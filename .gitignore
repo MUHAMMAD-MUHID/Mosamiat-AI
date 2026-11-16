@@ -1,0 +1,34 @@
+# Local reference material and internal reports: never commit or push.
+/AgentWeather_Project_Brief 4.pdf
+/SHINE - Session 1 1.pdf
+/MOSAMIAT_MASTER_ROADMAP.md
+/Self_Notes.docx
+/docs/work_completed_report.md
+
+# Personal editor settings.
+/.vscode/
+
+# Local Python runtime, environment, and caches.
+/.venv/
+/.tools/
+/.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets and generated artifacts.
+.env
+.env.*
+!.env.example
+/.streamlit/secrets.toml
+/data/
+/artifacts/
+/dist/
+/build/
+*.egg-info/
+.coverage
+htmlcov/
+*.log
+.ipynb_checkpoints/
