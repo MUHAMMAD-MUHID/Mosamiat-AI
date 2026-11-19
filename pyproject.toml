@@ -15,6 +15,13 @@ dependencies = [
 [project.scripts]
 mosamiat-collect = "mosamiat.collect:main"
 mosamiat-backfill = "mosamiat.backfill:main"
+mosamiat-store = "mosamiat.storage:main"
+
+[project.optional-dependencies]
+storage = [
+    "hopsworks[python]>=4.8,<4.9",
+    "python-dotenv>=1,<2",
+]
 
 [dependency-groups]
 dev = [
