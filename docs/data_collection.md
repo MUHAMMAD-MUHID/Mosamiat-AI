@@ -1,5 +1,8 @@
 # Step 02: Collect source data for Islamabad
 
+For resumable historical downloads and the unified hourly dataset, see
+[Module 02: historical reference dataset](data_dictionary.md).
+
 ## Purpose and boundaries
 
 Build and verify one local collector before adding storage services, feature

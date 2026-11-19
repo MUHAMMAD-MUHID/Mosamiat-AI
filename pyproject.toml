@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 mosamiat-collect = "mosamiat.collect:main"
+mosamiat-backfill = "mosamiat.backfill:main"
 
 [dependency-groups]
 dev = [
@@ -23,6 +24,9 @@ dev = [
 
 [tool.uv]
 cache-dir = ".cache/uv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py311"
