@@ -3,20 +3,16 @@
 This implements the first storage slice agreed for the current collector:
 one versioned provider-data feature group, upload and readback verification.
 The roadmap's feature, forecast, ledger, agent and drift tables remain later work
-when their producing modules and contracts exist. No cloud tables have been
-created or verified yet; a Hopsworks account and credentials are required.
+when their producing modules and contracts exist. Credentialed verification
+status is recorded under Completion gates below.
 
 ## Setup
 
 Install the optional storage dependencies from the project root:
 
-Setup is currently pending: repeated PyPI DNS/TLS timeouts prevented completing
-SDK installation and updating `uv.lock`. The optional requirements are declared
-in `pyproject.toml`; the existing lockfile has not been manually fabricated.
-Once connectivity is available, run the command below to resolve, lock and install
-them before the cloud test. Until then, `uv sync --locked` will reject the changed
-dependency declaration. Local collection commands and storage dry runs still work
-in the existing environment.
+The storage dependencies are installed and `uv.lock` is updated. On 20 November
+2026 the resolved SDK was Hopsworks 4.8.8, including the Python profile. Windows
+successfully built the required twofish dependency. A locked offline sync passed.
 
 ```powershell
 & ./.tools/bootstrap/bin/uv.exe sync --extra storage
@@ -31,7 +27,21 @@ HOPSWORKS_PROJECT=your-project-name
 HOPSWORKS_HOST=your-instance-hostname
 ```
 
-Use the hostname supplied by your Hopsworks instance, without a scheme or path.
+Use the hostname supplied by your Hopsworks instance. An HTTPS root URL is also
+accepted and normalized; project paths, credentials in URLs and query strings
+are rejected. Certificates are materialized under the ignored project-local
+`.cache/hopsworks/` directory because the SDK's `/tmp` default fails on Windows.
+Certificate directories are isolated by process so one client's cleanup cannot
+remove another running client's credentials.
+The adapter reuses the project's PEM certificates downloaded by the SDK at login.
+This avoids an unnecessary JKS conversion that fails on Java 21 keystores with
+released pyjks 20.0.0, and also avoids that conversion's hardcoded `/tmp` output.
+Only the authenticated project's own keystore/truststore paths are intercepted;
+unrelated connector credentials retain the SDK's original handling. This narrow
+compatibility adapter depends on the pinned 4.8 client internals and must be
+reviewed when upgrading the SDK. Upstream issue and proposed fix:
+https://github.com/kurtbrose/pyjks/issues/79 and
+https://github.com/kurtbrose/pyjks/pull/82.
 The SDK is constrained to the documented 4.8 client family; confirm compatibility
 with your instance before the live test. Existing environment variables override
 `.env`. The file is loaded only when connecting. `.env` is excluded by Git.
@@ -81,7 +91,10 @@ validates the remaining schema. No destructive overwrite option is used.
 
 Readback filters by city, valid-time range and retrieval-time range, then checks
 record IDs, duplicate counts, timestamps and values. It reads one snapshot's
-range, rather than the entire feature group. A readback mismatch fails the command.
+range, rather than the entire feature group. Retrieval filter bounds are rounded
+outward to whole seconds because server-side filters can lose fractional precision.
+Stored timestamps are not rounded: exact record IDs and field comparisons still
+apply after the query. A readback mismatch fails the command.
 Remote failures print the exception type rather than SDK exception text that could
 contain credentials. Diagnose account permissions/network settings locally if needed.
 
@@ -89,14 +102,19 @@ contain credentials. Diagnose account permissions/network settings locally if ne
 
 Local tests cover repeatable keys, revision separation, missing values, invalid
 metadata/units, corrupt backfills, SDK write arguments, key incompatibility,
-readback mismatches and redaction. Cloud authentication, instance compatibility,
-actual storage upsert behavior and offline readback remain unverified until the
-user supplies credentials. Training-source acceptance remains a separate decision.
+readback mismatches, fractional timestamp bounds, certificate handling and
+redaction. On 20 November 2026 all 84 project tests passed; Ruff lint and format
+checks passed. The final storage-only regression run passed all 17 storage tests.
 
-Local verification on 19 November 2026: 62 tests passed; Ruff lint and formatting
-passed. The storage dry run revalidated 624 records from the existing live
-two-day backfill. These checks do not establish SDK/server compatibility or prove
-remote idempotence; the credentialed `--verify` run remains the final gate.
+Credentialed authentication, offline materialization and full-field readback of
+624 records from the existing 1–2 October Islamabad backfill passed on 20 November
+2026. A separate bounded read confirmed exactly 624 unique record IDs, with all
+240 ERA5 and 384 CAMS records and unchanged retrieval timestamps. Both final
+upload/readback passes verified all 624 records, including a repeated upsert with
+no duplicate IDs or changed fields. The sanitized result is recorded in the
+local ignored `data/hopsworks-smoke.json`.
+Training-source acceptance remains a separate decision; this test establishes
+provider-data storage, not station observations or model readiness.
 
 References used for the adapter:
 

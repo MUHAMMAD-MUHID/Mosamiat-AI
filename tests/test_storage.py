@@ -1,5 +1,8 @@
 import json
+import sys
 from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -9,7 +12,71 @@ from test_collect import CITY, response_payload
 
 from mosamiat.backfill import backfill
 from mosamiat.collect import CollectionError, collect
-from mosamiat.storage import Repository, load_snapshot, main, snapshots
+from mosamiat.storage import Repository, connect, hostname, load_snapshot, main, snapshots
+
+
+@pytest.mark.parametrize("host", ["instance.example.com", "https://instance.example.com/"])
+def test_host_accepts_hostname_or_https_root(host):
+    assert hostname(host) == "instance.example.com"
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["", "http://example.com", "https://example.com/project", "https://user:secret@example.com"],
+)
+def test_host_rejects_invalid_settings_without_echoing_them(host):
+    with pytest.raises(CollectionError, match="instance hostname") as error:
+        hostname(host)
+    assert "secret" not in str(error.value)
+
+
+def test_connect_normalizes_url_and_uses_ignored_windows_certificate_directory(monkeypatch):
+    login = MagicMock()
+    monkeypatch.setitem(sys.modules, "hopsworks", SimpleNamespace(login=login))
+    monkeypatch.setitem(sys.modules, "dotenv", SimpleNamespace(load_dotenv=MagicMock()))
+    monkeypatch.setattr("mosamiat.storage.configure_project_certificates", MagicMock())
+    for name, value in {
+        "API_KEY": "test-only-key",
+        "PROJECT": "test-project",
+        "HOST": "https://instance.example.com/",
+    }.items():
+        monkeypatch.setenv(f"HOPSWORKS_{name}", value)
+    assert connect() is login.return_value.get_feature_store.return_value
+    settings = login.call_args.kwargs
+    assert settings["host"] == "instance.example.com"
+    assert Path(settings["cert_folder"]).parent == (Path.cwd() / ".cache" / "hopsworks").resolve()
+
+
+def test_project_pem_reuse_is_limited_to_authenticated_store_paths(tmp_path, monkeypatch):
+    from mosamiat.hopsworks_compat import configure_project_certificates
+
+    instance = MagicMock()
+    instance._get_jks_key_store_path.return_value = str(tmp_path / "keyStore.jks")
+    instance._get_jks_trust_store_path.return_value = str(tmp_path / "trustStore.jks")
+    paths = [tmp_path / name for name in ("ca.pem", "cert.pem", "key.pem")]
+    for path in paths:
+        path.write_text("test-only-placeholder")
+    instance._get_ca_chain_path.return_value = str(paths[0])
+    instance._get_client_cert_path.return_value = str(paths[1])
+    instance._get_client_key_path.return_value = str(paths[2])
+    original = instance._write_pem
+    monkeypatch.setitem(
+        sys.modules,
+        "hopsworks_common",
+        SimpleNamespace(client=SimpleNamespace(get_instance=lambda: instance)),
+    )
+    configure_project_certificates()
+    assert instance._write_pem(
+        tmp_path / "keyStore.jks", "unused", tmp_path / "trustStore.jks", "unused", "kafka"
+    ) == tuple(map(str, paths))
+    original.assert_not_called()
+    instance._write_pem("other.jks", "other", "other-trust.jks", "other", "external")
+    original.assert_called_once()
+    paths[2].unlink()
+    with pytest.raises(FileNotFoundError, match="PEM files are missing"):
+        instance._write_pem(
+            tmp_path / "keyStore.jks", "unused", tmp_path / "trustStore.jks", "unused", "kafka"
+        )
 
 
 @pytest.fixture
@@ -101,6 +168,7 @@ def test_upsert_reuses_group_and_waits_for_job(run):
 
 def test_readback_detects_changed_values_and_duplicate_records(run):
     frame = load_snapshot(run)
+    frame["retrieved_at_utc"] = pd.Timestamp("2025-03-01T00:00:00.050684Z")
     fg = MagicMock()
     # Behavioral mock: SDK/server compatibility still requires the live check.
     for name in ("valid_at_utc", "retrieved_at_utc"):
@@ -111,6 +179,8 @@ def test_readback_detects_changed_values_and_duplicate_records(run):
     read = fg.select_all.return_value.filter.return_value.read
     read.return_value = frame.iloc[::-1].copy()
     repo.verify(frame)
+    fg.retrieved_at_utc.__ge__.assert_called_with(pd.Timestamp("2025-03-01T00:00:00Z"))
+    fg.retrieved_at_utc.__le__.assert_called_with(pd.Timestamp("2025-03-01T00:00:01Z"))
     read.return_value.loc[0, "value"] = -999
     with pytest.raises(CollectionError, match="readback"):
         repo.verify(frame)

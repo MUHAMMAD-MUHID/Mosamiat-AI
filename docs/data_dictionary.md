@@ -86,6 +86,22 @@ do not substitute provider rain probabilities for measured rain outcomes. A rain
 event derived from ERA5 would still be a reanalysis-based label and needs an
 explicit event threshold and acceptance decision.
 
+## Module 05 audit outputs
+
+The reproducible [EDA command and notebooks](eda.md) audit every metric above.
+The [current findings](eda_findings.md) give coverage, longest gaps, extremes,
+rain-zero counts, circular wind statistics, source-specific AQI coverage and
+review candidates. Generated CSV tables, PNG charts and a portable HTML report
+are stored under `artifacts/eda-smoke/` for the existing two-day dataset.
+
+The source schema's AQI scale field is `US`, with numeric unit `US_AQI`. Wind
+direction uses circular statistics; no arithmetic degree mean or raw-degree
+Pearson coefficient is reported. IQR flags do not remove extremes. Local-day
+precipitation totals include available-hour counts and a completeness flag;
+null precipitation is never treated as zero. Historical rain probability
+remains entirely unavailable. EDA does not resolve source acceptance or establish
+operational point-in-time safety.
+
 Quality percentages use all requested hours, and longest missing streaks continue
 across monthly boundaries. The manifest also records missing counts per window;
 source identity is fixed by metric in the table above. Historical runs have

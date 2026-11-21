@@ -6,11 +6,13 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pandas as pd
 
 from mosamiat.backfill import digest
 from mosamiat.collect import AIR, PROBABILITY, WEATHER, City, CollectionError, normalize
+from mosamiat.hopsworks_compat import configure_project_certificates
 
 GROUP = "mosamiat_provider_data"
 VERSION = 1
@@ -147,6 +149,23 @@ def load_snapshot(path: Path) -> pd.DataFrame:
     return frame
 
 
+def hostname(value: str) -> str:
+    """Accept a bare hostname or an HTTPS instance URL without a path."""
+    parsed = urlsplit(value if "://" in value else f"https://{value}")
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path.strip("/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.port not in (None, 443)
+    ):
+        raise CollectionError("HOPSWORKS_HOST must be an instance hostname or HTTPS root URL")
+    return parsed.hostname
+
+
 def connect():
     # .env is local and ignored; existing environment values take precedence.
     from dotenv import load_dotenv
@@ -158,11 +177,20 @@ def connect():
     }
     if not all(settings.values()):
         raise CollectionError("Set HOPSWORKS_API_KEY, HOPSWORKS_PROJECT and HOPSWORKS_HOST in .env")
+    host = hostname(settings["HOST"])
+    # The SDK defaults to /tmp, which does not exist on many Windows machines.
+    identity = hashlib.sha256(f"{host}/{settings['PROJECT']}".encode()).hexdigest()[:16]
+    cert_folder = Path.cwd() / ".cache" / "hopsworks" / f"{identity}-{os.getpid()}"
     import hopsworks
 
-    return hopsworks.login(
-        api_key_value=settings["API_KEY"], project=settings["PROJECT"], host=settings["HOST"]
-    ).get_feature_store()
+    project = hopsworks.login(
+        api_key_value=settings["API_KEY"],
+        project=settings["PROJECT"],
+        host=host,
+        cert_folder=str(cert_folder.resolve()),
+    )
+    configure_project_certificates()
+    return project.get_feature_store()
 
 
 class Repository:
@@ -201,8 +229,10 @@ class Repository:
             (fg.city_id == first.city_id)
             & (fg.valid_at_utc >= expected.valid_at_utc.min().to_pydatetime())
             & (fg.valid_at_utc <= expected.valid_at_utc.max().to_pydatetime())
-            & (fg.retrieved_at_utc >= expected.retrieved_at_utc.min().to_pydatetime())
-            & (fg.retrieved_at_utc <= expected.retrieved_at_utc.max().to_pydatetime())
+            # Server-side timestamp filters can lose sub-millisecond precision.
+            # Widen only the query bounds; record IDs and stored values stay exact.
+            & (fg.retrieved_at_utc >= expected.retrieved_at_utc.min().floor("s").to_pydatetime())
+            & (fg.retrieved_at_utc <= expected.retrieved_at_utc.max().ceil("s").to_pydatetime())
         )
         actual = query.read()
         actual = actual[actual.record_id.isin(expected.record_id)].copy()

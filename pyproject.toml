@@ -10,14 +10,24 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "httpx>=0.28,<1",
     "pandas>=2.2,<3",
+    "numpy>=1.26,<3",
 ]
 
 [project.scripts]
 mosamiat-collect = "mosamiat.collect:main"
 mosamiat-backfill = "mosamiat.backfill:main"
 mosamiat-store = "mosamiat.storage:main"
+mosamiat-features = "mosamiat.features.pipeline:main"
+mosamiat-eda = "mosamiat.eda.pipeline:main"
+mosamiat-baseline = "mosamiat.modeling.evaluate:main"
 
 [project.optional-dependencies]
+analysis = [
+    "matplotlib>=3.9,<4",
+    "nbclient>=0.10,<1",
+    "nbformat>=5.10,<6",
+    "ipykernel>=6.29,<8",
+]
 storage = [
     "hopsworks[python]>=4.8,<4.9",
     "python-dotenv>=1,<2",
