@@ -16,7 +16,9 @@ FORECAST_METRICS = (
 CASE_KEY = ["split", "reference_at_utc", "target_at_utc", "horizon_hours", "metric"]
 
 
-def baseline_cases(values: pd.DataFrame, folds: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def baseline_cases(
+    values: pd.DataFrame, folds: dict[str, pd.DataFrame], rain_events: pd.Series | None = None
+) -> pd.DataFrame:
     targets = pd.concat({name: folds[name] for name in ("validation", "test")}, names=["split"])
     targets = targets.reset_index(level="split").reset_index(drop=True)
     # Repeat the last 24 completed hours. At h=24 yesterday's same-hour value
@@ -35,6 +37,9 @@ def baseline_cases(values: pd.DataFrame, folds: dict[str, pd.DataFrame]) -> pd.D
             # Brier verification requires a binary observed rain event.
             # The source schema supplies only provider probabilities and total precipitation.
             actual = pd.Series(np.nan, index=targets.index)
+            if rain_events is not None:
+                actual = rain_events.reindex(targets.target_at_utc).reset_index(drop=True)
+                seasonal = rain_events.reindex(source).reset_index(drop=True)
         cases = targets[CASE_KEY[:4]].assign(
             metric=metric,
             source_at_utc=source,

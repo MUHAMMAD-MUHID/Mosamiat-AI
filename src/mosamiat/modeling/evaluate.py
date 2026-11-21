@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from mosamiat.features.target_builder import build_targets
 from mosamiat.modeling.baseline import FORECAST_METRICS, baseline_cases
 from mosamiat.modeling.metrics import score_predictions
 from mosamiat.modeling.splits import split_targets
-from mosamiat.reference import load_reference
+from mosamiat.reference import ReferenceDataset, load_reference
 from mosamiat.storage import read_json
 
 
@@ -27,15 +28,14 @@ def boundary(value: str | None, index: pd.DatetimeIndex, percent: int) -> pd.Tim
     return stamp.tz_convert("UTC")
 
 
-def evaluate(
+def comparison_cases(
     dataset: Path,
-    output: Path,
+    reference: ReferenceDataset,
     city: City,
-    validation_start: str | None = None,
-    test_start: str | None = None,
-) -> dict:
-    reference = load_reference(dataset, city)
-    reference.protect_output(dataset, output)
+    validation_start: str | None,
+    test_start: str | None,
+    rain_events: pd.Series | None = None,
+) -> tuple[pd.DataFrame, dict]:
     values = reference.values
     validate_hourly(values)
     if not values.index.equals(reference.expected_index):
@@ -45,10 +45,8 @@ def evaluate(
     end = values.index[-1] + pd.Timedelta(hours=1)
     targets = build_targets(values[list(FORECAST_METRICS)], list(range(1, 25)))
     folds = split_targets(targets, validation, test, end)
-    cases = baseline_cases(values, folds)
-    scores = score_predictions(cases, cases.seasonal_naive)
+    cases = baseline_cases(values, folds, rain_events)
     manifest = {
-        "kind": "seasonal_naive_evaluation",
         "schema_version": 1,
         "status": "building",
         "city_id": city.city_id,
@@ -58,13 +56,29 @@ def evaluate(
         "test_start_utc": test.isoformat(),
         "end_exclusive_utc": end.isoformat(),
         "fold_pairs": {name: len(frame) for name, frame in folds.items()},
-        "scored_metric_cases": int(scores.scored.sum()),
         "units": {metric: METRICS[metric] for metric in FORECAST_METRICS},
         "provenance": reference.provenance(dataset),
         "is_ground_truth": False,
         "operational_point_in_time_safe": False,
         "attribution": "Open-Meteo, ECMWF ERA5, Copernicus CAMS",
     }
+    return cases, manifest
+
+
+def aligned_predictions(cases: pd.DataFrame, wide: pd.DataFrame) -> pd.Series:
+    long = wide.set_index("target_at_utc", append=True).rename_axis(columns="metric").stack()
+    keys = cases.index.droplevel("split")
+    aligned = long.reorder_levels(keys.names).reindex(keys)
+    return pd.Series(aligned.to_numpy(), index=cases.index)
+
+
+def publish_evaluation(
+    output: Path,
+    manifest: dict,
+    tables: dict[str, pd.DataFrame],
+    save_model: Callable[[Path], None] | None = None,
+    model_filename: str = "model.joblib",
+) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     lock = output / ".lock"
     try:
@@ -79,19 +93,38 @@ def evaluate(
                 or read_json(manifest_path).get("kind") != manifest["kind"]
             ):
                 raise CollectionError(
-                    "Choose an empty output directory or a prior baseline evaluation"
+                    "Choose an empty output directory or a prior evaluation of the same kind"
                 )
             write_json(manifest_path, manifest)
-            for name, table in (("cases.csv", cases), ("metrics.csv", scores)):
+            for name, table in tables.items():
                 table.to_csv(output / name)
+            files = list(tables)
+            if save_model is not None:
+                save_model(output / model_filename)
+                files.append(model_filename)
             manifest.update(
                 status="complete",
-                sha256={name: digest(output / name) for name in ("cases.csv", "metrics.csv")},
+                sha256={name: digest(output / name) for name in files},
             )
             write_json(manifest_path, manifest)
     finally:
         lock.unlink()
     return manifest
+
+
+def evaluate(
+    dataset: Path,
+    output: Path,
+    city: City,
+    validation_start: str | None = None,
+    test_start: str | None = None,
+) -> dict:
+    reference = load_reference(dataset, city)
+    reference.protect_output(dataset, output)
+    cases, manifest = comparison_cases(dataset, reference, city, validation_start, test_start)
+    scores = score_predictions(cases, cases.seasonal_naive)
+    manifest.update(kind="seasonal_naive_evaluation", scored_metric_cases=int(scores.scored.sum()))
+    return publish_evaluation(output, manifest, {"cases.csv": cases, "metrics.csv": scores})
 
 
 def main(argv: list[str] | None = None) -> int:

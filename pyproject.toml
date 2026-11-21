@@ -20,8 +20,12 @@ mosamiat-store = "mosamiat.storage:main"
 mosamiat-features = "mosamiat.features.pipeline:main"
 mosamiat-eda = "mosamiat.eda.pipeline:main"
 mosamiat-baseline = "mosamiat.modeling.evaluate:main"
+mosamiat-statistical = "mosamiat.modeling.statistical:main"
+mosamiat-classical = "mosamiat.modeling.classical:main"
+mosamiat-lstm = "mosamiat.modeling.deep_learning:main"
 
 [project.optional-dependencies]
+deep-learning = ["torch>=2.6,<3"]
 analysis = [
     "matplotlib>=3.9,<4",
     "nbclient>=0.10,<1",
@@ -32,6 +36,11 @@ storage = [
     "hopsworks[python]>=4.8,<4.9",
     "python-dotenv>=1,<2",
 ]
+modeling = [
+    "joblib>=1.4,<2",
+    "scikit-learn>=1.6,<1.9",
+    "statsmodels>=0.14.4,<0.15",
+]
 
 [dependency-groups]
 dev = [
@@ -41,6 +50,14 @@ dev = [
 
 [tool.uv]
 cache-dir = ".cache/uv"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
