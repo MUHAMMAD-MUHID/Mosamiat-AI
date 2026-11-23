@@ -39,13 +39,18 @@ def recent_history(snapshot: Path, city: City, now: pd.Timestamp):
     return history, frame.retrieved_at_utc.max()
 
 
-def forecast(history, reference, city, bundle):
+def issue_features(history, reference, city, definitions):
+    # Empty issue-hour row supplies the forecast clock. All inputs come from previous hours.
+    values = history.reindex(history.index.append(pd.DatetimeIndex([reference])))
+    return transform(values, definitions, city.timezone).tail(1)
+
+
+def forecast(history, reference, city, bundle, *, sample=None):
     forest, manifest, scores = bundle
     if manifest["city_id"] != city.city_id or manifest["timezone"] != city.timezone:
         raise CollectionError("Registered model is for a different city")
-    # Empty issue-hour row supplies the forecast clock. All inputs come from previous hours.
-    values = history.reindex(history.index.append(pd.DatetimeIndex([reference])))
-    sample = transform(values, manifest["feature_definitions"], city.timezone).tail(1)
+    if sample is None:
+        sample = issue_features(history, reference, city, manifest["feature_definitions"])
     predictions = forest.predict(sample).xs(reference, level="reference_at_utc")
     scores = (
         scores.loc[scores.split.eq("validation")]

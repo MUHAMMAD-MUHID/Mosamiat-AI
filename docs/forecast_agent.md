@@ -87,3 +87,18 @@ The checked-in monitoring profile belongs to the pinned v1 bundle. To reproduce 
 Use the normal forecast command to run all four agents, or `--retry RUN_ID` to resume a saved forecast. Retain the source snapshot and the SQLite checkpoint for replay. New requests train locally on the graph worker. Hopsworks holds the team-visible decision record.
 
 For the saved `islamabad_20261123T15Z` forecast, the temperature and the sine component of wind direction crossed their training ranges. No archived t+24 forecast pairs were available. The resulting candidate trained and evaluated on the 18 September–17 November 2026 archive window. Its t+24 validation AQI RMSE was 19.93, compared with 18.77 for seasonal naive on the same 269 cases. The serving configuration remains pinned to v1.
+
+## Scheduled pipelines
+
+The **Mosamiat pipelines** GitHub Actions workflow runs from `main` on GitHub-hosted Ubuntu workers. Configure the repository Actions secrets `HOPSWORKS_API_KEY`, `HOPSWORKS_PROJECT`, and `HOPSWORKS_HOST`. Each live step reads these settings from its environment. The **check** job uses offline fixtures and requires no credentials.
+
+| Pipeline | Schedule | Result |
+| --- | --- | --- |
+| Hourly | Minute 12 of every UTC hour | Publishes the exact model input row to `mosamiat_hourly_features` v1, verifies it by readback, then runs the forecast, bulletin and drift publications. |
+| Daily | 01:37 UTC (06:37 Pakistan time) | Fits and evaluates a Random Forest on 61 days of archived provider data ending six UTC dates before execution. Registers and reloads a candidate with the UTC date as the version (`YYYYMMDD`). The serving policy continues to use v1. |
+
+Actions can start later than the cron time. The forecast uses the actual UTC hour of execution. A missed hour leaves a gap. [GitHub scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
+Hosted runs keep their own ledger, snapshots and candidate evaluations under `Resources/mosamiat_islamabad/` in the Hopsworks project. The first hosted run starts its own history. Run one scheduled publisher per city. A new runner restores the latest checksummed ledger. It resumes a prepared run interrupted by worker loss before issuing the current forecast. Each completed upload is checked before publication, and the two newest ledger generations are retained. Source snapshots and candidate bundles accumulate under this project directory.
+
+In **Actions → Mosamiat pipelines → Run workflow**, select **check** to exercise the workflows with fixtures, **daily** to train or verify today's candidate, or **hourly** to issue a current forecast. To replay a failed prepared forecast, select **hourly** and enter its run ID in the optional retry field. A daily retry on the same UTC date reuses the saved evaluation. Credentialed runs write to Hopsworks. The workflow log reports success only after readback.

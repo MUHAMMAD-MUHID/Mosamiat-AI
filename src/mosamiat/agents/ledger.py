@@ -112,7 +112,11 @@ class Ledger:
 
 
 def publish(store, payload):
-    metadata = {k: v for k, v in payload.items() if k not in {"forecasts", "snapshot_path"}}
+    metadata = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"forecasts", "snapshot_path", "input_features"}
+    }
     frame = pd.DataFrame(payload["forecasts"]).assign(**metadata)
     frame["forecast_id"] = frame.run_id + "_" + frame.horizon_hours.astype(str) + "_" + frame.metric
     timestamps = ["target_at_utc", "reference_at_utc", "issued_at_utc", "retrieved_at_utc"]

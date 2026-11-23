@@ -81,12 +81,14 @@ def fit_candidate(city, request, root):
         return digest(path)
 
 
-def run_drift(city, payload, ledger, store, root=Path("data/drift")):
+def run_drift(city, payload, ledger, store, root=Path("data/drift"), trainer=None):
     decision = checkpoint(ledger, payload, lambda: evaluate(city, payload, ledger, root))
     result = dict(decision, candidate_sha256="", training_status="not_requested")
     if decision["request_id"]:
         try:
-            result["candidate_sha256"] = fit_candidate(city, decision["request_id"], root)
+            result["candidate_sha256"] = (trainer or fit_candidate)(
+                city, decision["request_id"], root
+            )
             result["training_status"] = "candidate_evaluated"
         except Exception as error:
             result["training_status"] = "failed"

@@ -19,7 +19,14 @@ from mosamiat.agents.ledger import Ledger, publish, publish_bulletin
 from mosamiat.agents.retraining import run_drift
 from mosamiat.backfill import digest
 from mosamiat.collect import City, CollectionError, collect
-from mosamiat.modeling.inference import MANIFEST, MODEL, VERSION, forecast, recent_history
+from mosamiat.modeling.inference import (
+    MANIFEST,
+    MODEL,
+    VERSION,
+    forecast,
+    issue_features,
+    recent_history,
+)
 from mosamiat.modeling.registry import load_forecast_bundle
 from mosamiat.storage import connect_project
 
@@ -52,7 +59,15 @@ def _publication_interrupted(error):
     )
 
 
-def build_graph(city, ledger, project, now=lambda: pd.Timestamp.now(tz="UTC")):
+def build_graph(
+    city,
+    ledger,
+    project,
+    now=lambda: pd.Timestamp.now(tz="UTC"),
+    *,
+    publish_inputs=None,
+    trainer=None,
+):
     def prepare(state):
         run_id = state["run_id"]
         existing = ledger.get(run_id)
@@ -72,7 +87,14 @@ def build_graph(city, ledger, project, now=lambda: pd.Timestamp.now(tz="UTC")):
             raise CollectionError("The forecast hour expired during ingestion")
         history, retrieved = recent_history(path, city, issued)
         bundle = load_forecast_bundle(project().get_model_registry(), MODEL, VERSION, MANIFEST)
-        rows = forecast(history, reference, city, bundle)
+        sample = issue_features(history, reference, city, bundle[1]["feature_definitions"])
+        rows = forecast(history, reference, city, bundle, sample=sample)
+        inputs = {}
+        if publish_inputs is not None:
+            selected = sample[bundle[1]["features"]].iloc[0]
+            inputs["input_features"] = {
+                key: float(value) if pd.notna(value) else None for key, value in selected.items()
+            }
         issued = now().floor("us")
         if issued.floor("h") != reference:
             raise CollectionError("The forecast hour expired before inference completed")
@@ -92,13 +114,17 @@ def build_graph(city, ledger, project, now=lambda: pd.Timestamp.now(tz="UTC")):
                 evaluation_sha256=MANIFEST,
                 policy_version=1,
                 forecasts=rows,
+                **inputs,
             )
         )
         ledger.log(run_id, "prepared", "24 horizons and eight fields")
         return {"payload": payload, "status": "prepared"}
 
     def persist(state):
-        publish(project().get_feature_store(), state["payload"])
+        store = project().get_feature_store()
+        if publish_inputs is not None:
+            publish_inputs(store, state["payload"])
+        publish(store, state["payload"])
         ledger.log(state["run_id"], "verified", "192 remote forecast rows matched")
         return {"status": "verified"}
 
@@ -115,7 +141,9 @@ def build_graph(city, ledger, project, now=lambda: pd.Timestamp.now(tz="UTC")):
 
     def drift(state):
         return {
-            "drift_result": run_drift(city, state["payload"], ledger, project().get_feature_store())
+            "drift_result": run_drift(
+                city, state["payload"], ledger, project().get_feature_store(), trainer=trainer
+            )
         }
 
     def audited(name, node):

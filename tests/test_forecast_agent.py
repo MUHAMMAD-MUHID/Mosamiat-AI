@@ -51,6 +51,7 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
         timezone=CITY.timezone,
         rain_training_event_rate=0.1,
         feature_definitions=load_definitions(Path("configs/features.toml")),
+        features=["temperature_c_lag_1h", "hour"],
     )
     loader = MagicMock(return_value=(forest, manifest, scores))
     monkeypatch.setattr(graph, "load_forecast_bundle", loader)
@@ -63,7 +64,8 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
     read = group.select_all.return_value.filter.return_value.read
     read.side_effect = ConnectionError("Readback interrupted")
     ledger = graph.Ledger(tmp_path / "ledger.sqlite3")
-    app = graph.build_graph(CITY, ledger, project, lambda: now)
+    publish_inputs = MagicMock()
+    app = graph.build_graph(CITY, ledger, project, lambda: now, publish_inputs=publish_inputs)
     args = dict(run_id="hourly", reference_at_utc=reference.isoformat(), snapshot=str(path))
     with pytest.raises(ConnectionError):
         app.invoke(args)
@@ -111,6 +113,10 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
     assert bulletins.insert.call_args.args[0].iloc[0].report_trigger == "daily"
     assert drift_group.insert.call_args.args[0].iloc[0].run_id == "hourly"
     loader.assert_called_once()
+    assert publish_inputs.call_args.args[1]["input_features"] == (
+        forest.predict.call_args.args[0][manifest["features"]].iloc[0].to_dict()
+    )
+    assert "input_features" not in saved
     assert saved.forecast_id.nunique() == len(saved) == 192
     assert saved.target_at_utc.nunique() == 24
     assert saved.loc[saved.metric.eq("aqi_value"), "model_name"].eq(MODEL).all()

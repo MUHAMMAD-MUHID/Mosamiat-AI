@@ -1,0 +1,64 @@
+name: Mosamiat pipelines
+
+on:
+  schedule:
+    - cron: '12 * * * *'
+    - cron: '37 1 * * *'
+  push:
+    branches: [main]
+    paths: ['.github/workflows/pipelines.yml', 'src/**', 'tests/**', 'configs/**', 'pyproject.toml', 'uv.lock']
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        description: Pipeline to run
+        type: choice
+        options: [check, hourly, daily]
+        default: check
+        required: true
+      retry_run:
+        description: Optional prepared hourly run ID to replay
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    concurrency:
+      group: mosamiat-${{ inputs.pipeline || (github.event.schedule == '12 * * * *' && 'hourly') || (github.event.schedule == '37 1 * * *' && 'daily') || 'check' }}
+      cancel-in-progress: false
+    env:
+      PIPELINE: ${{ inputs.pipeline || (github.event.schedule == '12 * * * *' && 'hourly') || (github.event.schedule == '37 1 * * *' && 'daily') || 'check' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install locked runner environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bootstrap"
+          "$RUNNER_TEMP/bootstrap/bin/pip" install uv==0.13.8
+          echo "$RUNNER_TEMP/bootstrap/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bootstrap/bin/uv" sync --locked --extra agents --extra storage --extra modeling
+      - name: Exercise both pipelines with offline fixtures
+        if: env.PIPELINE == 'check'
+        run: |
+          uv run --no-sync ruff check src tests
+          uv run --no-sync pytest -q tests/test_scheduled.py tests/test_forecast_agent.py tests/test_drift.py tests/test_registry.py
+      - name: Run scheduled pipeline
+        if: env.PIPELINE != 'check'
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+          HOPSWORKS_HOST: ${{ secrets.HOPSWORKS_HOST }}
+          HOPSWORKS_PROJECT: ${{ secrets.HOPSWORKS_PROJECT }}
+          RETRY_RUN: ${{ inputs.retry_run }}
+        run: |
+          for key in HOPSWORKS_API_KEY HOPSWORKS_HOST HOPSWORKS_PROJECT; do
+            if [[ -z "${!key}" ]]; then echo "::error::Missing repository secret $key"; exit 1; fi
+          done
+          args=("$PIPELINE")
+          if [[ -n "$RETRY_RUN" ]]; then args+=(--retry "$RETRY_RUN"); fi
+          uv run --no-sync python -m mosamiat.scheduled "${args[@]}"
