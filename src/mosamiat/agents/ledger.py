@@ -48,6 +48,20 @@ class Ledger:
                 (run_id, pd.Timestamp.now(tz="UTC").isoformat(), status, detail),
             )
 
+    @staticmethod
+    def history(path: Path, run_id: str):
+        if not path.is_file():
+            return []
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT at_utc, status, detail FROM events WHERE run_id=? ORDER BY rowid",
+                    (run_id,),
+                )
+            ]
+
     def bulletin(self, city, payload, alerts):
         run_id = payload["run_id"]
         issued = pd.Timestamp(payload["issued_at_utc"])
@@ -98,7 +112,7 @@ class Ledger:
 
 
 def publish(store, payload):
-    metadata = {k: v for k, v in payload.items() if k != "forecasts"}
+    metadata = {k: v for k, v in payload.items() if k not in {"forecasts", "snapshot_path"}}
     frame = pd.DataFrame(payload["forecasts"]).assign(**metadata)
     frame["forecast_id"] = frame.run_id + "_" + frame.horizon_hours.astype(str) + "_" + frame.metric
     timestamps = ["target_at_utc", "reference_at_utc", "issued_at_utc", "retrieved_at_utc"]

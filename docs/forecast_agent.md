@@ -33,6 +33,18 @@ The local SQLite ledger at `data/forecasts/ledger.sqlite3` checkpoints the first
 
 For a recurring job, preserve the checkpoint directory between executions and use one publisher per city. Separate machines with separate local ledgers can prepare different revisions under the same hourly key.
 
+### Inspect an interrupted run
+
+Use the run ID printed by the forecast command to read its local event history in order. This also works for older runs that recorded fewer events.
+
+```powershell
+& ./.venv/Scripts/python.exe -m mosamiat.agents.graph --history islamabad_20261123T15Z
+```
+
+Each new attempt records the node name on entry. A node failure records the node name and exception type. A `verified` event confirms the forecast rows matched Hopsworks. A `completed` event means the entire graph finished, including drift. If a process stops abruptly, the last recorded event identifies how far it got.
+
+Forecast and bulletin publication each allow three total attempts for recognized connection interruptions and timeouts. A readback mismatch stops the run immediately. After fixing the underlying issue, use `--retry RUN_ID` when a prepared forecast exists. The graph replays its saved values and checks the remote writes again. If the run failed before preparation, start a normal forecast for the current hour.
+
 ## Alert Agent
 
 After Hopsworks confirms the forecast, the Alert Agent evaluates each of the 24 hourly targets. Adjacent hours crossing the same threshold form one episode. An episode includes the first and last affected target, the most extreme value and its timestamp, and guidance for the general public, sensitive groups and outdoor workers. A later forecast that clears a rule removes that episode from the current outlook. Earlier bulletins preserve what was forecast at the time.
@@ -57,3 +69,21 @@ The AQI cutoffs use the starts of the US sensitive-group and unhealthy bands. WH
 The first processed forecast of each Islamabad calendar day generates a report. A new or more severe alert episode triggers an update within the same day. The agent treats overlapping or directly adjacent hourly targets for the same rule as a continuing episode. Quiet hours still record the alert evaluation and the reason the report was skipped.
 
 The report uses deterministic prose based on the verified forecasts and alerts. It includes local times, temperature, AQI, precipitation, rain probability, humidity, UV, wind and the alert guidance. Both agents run without an LLM account. The graph saves one bulletin per run in SQLite and upserts it to Hopsworks feature group `mosamiat_weather_bulletins` v1. Each row contains the active alert episodes, new-episode count, report trigger, rule version and report text. A retry reuses the saved bulletin and checks the remote row against it.
+
+## Drift Agent
+
+The fourth node runs after the bulletin and writes one decision per hourly run to `mosamiat_drift_log` v1 in Hopsworks. The log includes the input and evaluation hashes, the check windows, sample counts, scores, thresholds, retraining request and candidate outcome. An incomplete window is recorded as `insufficient`. Replaying the same run reuses the checkpointed decision.
+
+- **Input drift.** The node checks 14 rolling means from the registered forest's input schema using the same 24 completed hours as inference. Each mean has a lower and upper limit taken from the 830 eligible training rows. Wind direction is represented by its sine and cosine. One crossing triggers a candidate fit. These limits describe the training season in Islamabad. A seasonal change alone can cross them.
+- **Forecast-error drift.** The first policy monitors the 24-hour lead for all eight fields. It matches previously verified forecasts to archived ERA5 weather and CAMS air-quality references by city, UTC target, method and version. Verification uses the latest seven-day archive window ending six UTC dates before the forecast's issue date. It requires 24 consecutive matched target hours per field. The upper limit is the largest 24-hour rolling validation error for the serving method. The scores are RMSE for continuous values, circular MAE for wind direction and Brier score against liquid-rain events for rain probability. Provider reference values can differ from local station observations.
+- **Retraining.** The first crossing checkpoints a request and runs the existing Random Forest trainer on the latest 61 archive days eligible at issue time, using chronological train, validation and test splits. Crossings within 24 hours share the request. A retry verifies and reuses a completed candidate. Its weights, scores, forecasts and manifest are stored together under `data/drift/candidates/<request_id>/evaluation/`. Serving continues with the registered version until a separate promotion decision compares the models on common validation cases.
+
+The checked-in monitoring profile belongs to the pinned v1 bundle. To reproduce it from the original local evaluations, run the following from the repository root.
+
+```powershell
+& ./.venv/Scripts/python.exe -m mosamiat.modeling.drift_profile artifacts/classical-2025-sep-oct data/features-2025-sep-oct configs/drift_islamabad_v1.json
+```
+
+Use the normal forecast command to run all four agents, or `--retry RUN_ID` to resume a saved forecast. Retain the source snapshot and the SQLite checkpoint for replay. New requests train locally on the graph worker. Hopsworks holds the team-visible decision record.
+
+For the saved `islamabad_20261123T15Z` forecast, the temperature and the sine component of wind direction crossed their training ranges. No archived t+24 forecast pairs were available. The resulting candidate trained and evaluated on the 18 September–17 November 2026 archive window. Its t+24 validation AQI RMSE was 19.93, compared with 18.77 for seasonal naive on the same 269 cases. The serving configuration remains pinned to v1.

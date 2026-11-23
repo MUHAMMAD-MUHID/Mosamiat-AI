@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "evaluation_sha256": "1487f5d407c6a4df2c6f5af7e5abd99d9a7abeebd04fb2b6d4b81cfe415ac726",
+  "city_id": "islamabad",
+  "inputs": {
+    "temperature_c": {
+      "lower": 20.195833333333336,
+      "upper": 31.370833333333334,
+      "n": 830
+    },
+    "humidity_pct": {
+      "lower": 47.125,
+      "upper": 85.16666666666667,
+      "n": 830
+    },
+    "precipitation_mm": {
+      "lower": 0.0,
+      "upper": 1.5458333333333334,
+      "n": 830
+    },
+    "wind_speed_mps": {
+      "lower": 0.945,
+      "upper": 2.8504166666666664,
+      "n": 830
+    },
+    "aqi_value": {
+      "lower": 68.54166666666667,
+      "upper": 140.875,
+      "n": 830
+    },
+    "uv_index": {
+      "lower": 0.4458333333333333,
+      "upper": 2.0083333333333333,
+      "n": 830
+    },
+    "pm2_5_ug_m3": {
+      "lower": 17.170833333333334,
+      "upper": 52.50833333333333,
+      "n": 830
+    },
+    "pm10_ug_m3": {
+      "lower": 17.379166666666666,
+      "upper": 58.84583333333333,
+      "n": 830
+    },
+    "carbon_monoxide_ug_m3": {
+      "lower": 705.4583333333334,
+      "upper": 1379.7916666666667,
+      "n": 830
+    },
+    "nitrogen_dioxide_ug_m3": {
+      "lower": 22.64583333333333,
+      "upper": 60.80416666666667,
+      "n": 830
+    },
+    "sulphur_dioxide_ug_m3": {
+      "lower": 5.0125,
+      "upper": 20.1875,
+      "n": 830
+    },
+    "ozone_ug_m3": {
+      "lower": 35.375,
+      "upper": 107.41666666666669,
+      "n": 830
+    },
+    "wind_direction_sin": {
+      "lower": -0.2643817554531513,
+      "upper": 0.6210288895557372,
+      "n": 830
+    },
+    "wind_direction_cos": {
+      "lower": -0.4647148570601385,
+      "upper": 0.8359850892822869,
+      "n": 830
+    }
+  },
+  "errors": {
+    "aqi_value": {
+      "model": "mosamiat_islamabad_random_forest",
+      "measure": "rmse",
+      "upper": 16.592418407375863,
+      "n": 246
+    },
+    "temperature_c": {
+      "model": "seasonal_naive",
+      "measure": "rmse",
+      "upper": 3.2129296081095,
+      "n": 246
+    },
+    "precipitation_mm": {
+      "model": "seasonal_naive",
+      "measure": "rmse",
+      "upper": 0.4102844541697057,
+      "n": 246
+    },
+    "rain_probability": {
+      "model": "training_rain_frequency",
+      "measure": "brier",
+      "upper": 0.01220546800815687,
+      "n": 246
+    },
+    "humidity_pct": {
+      "model": "seasonal_naive",
+      "measure": "rmse",
+      "upper": 9.048480535426929,
+      "n": 246
+    },
+    "uv_index": {
+      "model": "seasonal_naive",
+      "measure": "rmse",
+      "upper": 0.4019483797703382,
+      "n": 246
+    },
+    "wind_speed_mps": {
+      "model": "mosamiat_islamabad_random_forest",
+      "measure": "rmse",
+      "upper": 0.881551188047606,
+      "n": 246
+    },
+    "wind_direction_deg": {
+      "model": "seasonal_naive",
+      "measure": "circular_mae_deg",
+      "upper": 36.083333333333336,
+      "n": 246
+    }
+  }
+}

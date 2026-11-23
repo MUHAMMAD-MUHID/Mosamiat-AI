@@ -1068,6 +1068,7 @@ dependencies = [
 [package.optional-dependencies]
 agents = [
     { name = "langgraph" },
+    { name = "requests" },
 ]
 analysis = [
     { name = "ipykernel" },
@@ -1108,6 +1109,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "pandas", specifier = ">=2.2,<3" },
     { name = "python-dotenv", marker = "extra == 'storage'", specifier = ">=1,<2" },
+    { name = "requests", marker = "extra == 'agents'", specifier = ">=2.32,<3" },
     { name = "scikit-learn", marker = "extra == 'modeling'", specifier = ">=1.6,<1.9" },
     { name = "statsmodels", marker = "extra == 'modeling'", specifier = ">=0.14.4,<0.15" },
     { name = "torch", marker = "sys_platform == 'darwin' and extra == 'deep-learning'", specifier = ">=2.6,<3" },

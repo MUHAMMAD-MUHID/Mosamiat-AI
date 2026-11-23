@@ -26,7 +26,7 @@ mosamiat-lstm = "mosamiat.modeling.deep_learning:main"
 mosamiat-forecast = "mosamiat.agents.graph:main"
 
 [project.optional-dependencies]
-agents = ["langgraph>=1,<2"]
+agents = ["langgraph>=1,<2", "requests>=2.32,<3"]
 deep-learning = ["torch>=2.6,<3"]
 analysis = [
     "matplotlib>=3.9,<4",
