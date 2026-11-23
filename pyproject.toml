@@ -23,8 +23,10 @@ mosamiat-baseline = "mosamiat.modeling.evaluate:main"
 mosamiat-statistical = "mosamiat.modeling.statistical:main"
 mosamiat-classical = "mosamiat.modeling.classical:main"
 mosamiat-lstm = "mosamiat.modeling.deep_learning:main"
+mosamiat-forecast = "mosamiat.agents.graph:main"
 
 [project.optional-dependencies]
+agents = ["langgraph>=1,<2"]
 deep-learning = ["torch>=2.6,<3"]
 analysis = [
     "matplotlib>=3.9,<4",

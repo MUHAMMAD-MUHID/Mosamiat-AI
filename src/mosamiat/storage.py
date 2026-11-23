@@ -166,7 +166,7 @@ def hostname(value: str) -> str:
     return parsed.hostname
 
 
-def connect():
+def connect_project():
     # .env is local and ignored; existing environment values take precedence.
     from dotenv import load_dotenv
 
@@ -190,7 +190,11 @@ def connect():
         cert_folder=str(cert_folder.resolve()),
     )
     configure_project_certificates()
-    return project.get_feature_store()
+    return project
+
+
+def connect():
+    return connect_project().get_feature_store()
 
 
 class Repository:
