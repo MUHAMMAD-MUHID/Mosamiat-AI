@@ -60,6 +60,7 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
         project.return_value.get_feature_store.return_value.get_or_create_feature_group.return_value
     )
     group.primary_key = ["forecast_id"]
+    group.insert.return_value = (None, None)
     group.event_time = "target_at_utc"
     read = group.select_all.return_value.filter.return_value.read
     read.side_effect = ConnectionError("Readback interrupted")
@@ -77,15 +78,17 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
     saved = group.insert.call_args.args[0]
     read.side_effect = [httpx.ReadTimeout("interrupted readback"), saved.copy()]
     bulletins = MagicMock()
+    bulletins.insert.return_value = (None, None)
     bulletins.primary_key = ["run_id"]
     bulletins.event_time = "issued_at_utc"
-    bulletins.select_all.return_value.filter.return_value.read.side_effect = lambda: (
+    bulletins.select_all.return_value.filter.return_value.read.side_effect = lambda **_: (
         bulletins.insert.call_args.args[0].copy()
     )
     drift_group = MagicMock()
+    drift_group.insert.return_value = (None, None)
     drift_group.primary_key = ["run_id"]
     drift_group.event_time = "issued_at_utc"
-    drift_group.select_all.return_value.filter.return_value.read.side_effect = lambda: (
+    drift_group.select_all.return_value.filter.return_value.read.side_effect = lambda **_: (
         drift_group.insert.call_args.args[0].copy()
     )
     monkeypatch.setattr(

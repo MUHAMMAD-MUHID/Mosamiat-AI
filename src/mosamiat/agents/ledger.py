@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -148,6 +149,26 @@ def publish_bulletin(store, result):
     )
 
 
+def _wait_for_materialization(job, name, timeout=360):
+    deadline = time.monotonic() + timeout
+    execution_id = None
+    while True:
+        # The SDK returns executions newest first. Follow the same ID on later polls.
+        executions = job.get_executions()
+        if executions and execution_id is None:
+            execution_id = executions[0].id
+        current = next((item for item in executions if item.id == execution_id), None)
+        if current is not None:
+            if current.success is True:
+                return
+            if current.success is False:
+                raise CollectionError(f"{name} materialization {execution_id} failed")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CollectionError(f"{name} materialization {execution_id} exceeded {timeout}s")
+        time.sleep(min(5, remaining))
+
+
 def _write_verified(store, frame, name, key, event_time, timestamps, description):
     group = store.get_or_create_feature_group(
         name=name,
@@ -161,8 +182,16 @@ def _write_verified(store, frame, name, key, event_time, timestamps, description
     )
     if list(group.primary_key) != [key] or group.event_time != event_time:
         raise CollectionError(f"Incompatible {name} keys")
-    group.insert(frame, operation="upsert", wait=True, write_options={"wait_for_job": True})
-    actual = group.select_all().filter(group.run_id == frame.run_id.iloc[0]).read()
+    print(f"Publishing {len(frame)} rows to {name}", flush=True)
+    job, _ = group.insert(frame, operation="upsert", wait=False)
+    if job is not None:
+        _wait_for_materialization(job, name)
+    print(f"Reading back {name}", flush=True)
+    actual = (
+        group.select_all()
+        .filter(group.run_id == frame.run_id.iloc[0])
+        .read(read_options={"arrow_flight_config": {"timeout": 90}})
+    )
     for column in timestamps:
         actual[column] = pd.to_datetime(actual[column], utc=True)
     try:

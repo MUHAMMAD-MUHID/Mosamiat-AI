@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pandas as pd
@@ -7,6 +8,24 @@ import pytest
 from test_collect import CITY
 
 scheduled = pytest.importorskip("mosamiat.scheduled")
+
+
+def test_materialization_polls_original_job_and_bounds_wait(monkeypatch):
+    from mosamiat.agents import ledger
+
+    monkeypatch.setattr(ledger.time, "sleep", lambda _: None)
+    running = SimpleNamespace(id=12, success=None)
+    finished = SimpleNamespace(id=12, success=True)
+    unrelated = SimpleNamespace(id=13, success=False)
+    job = Mock()
+    job.get_executions.side_effect = [[running], [unrelated, finished]]
+    ledger._wait_for_materialization(job, "features")
+    job.get_executions.side_effect = [[running]]
+    with pytest.raises(scheduled.CollectionError, match="exceeded"):
+        ledger._wait_for_materialization(job, "features", timeout=0)
+    job.get_executions.side_effect = [[unrelated]]
+    with pytest.raises(scheduled.CollectionError, match="failed"):
+        ledger._wait_for_materialization(job, "features")
 
 
 class DatasetFiles:

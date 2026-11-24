@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import sys
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -256,6 +257,11 @@ def main(argv=None):
     city = City.load(Path("configs/city.toml"))
     try:
         project = connect_project()
+        # The pinned SDK sends REST requests with no transport timeout by default.
+        from hopsworks_common import client
+
+        session = client.get_instance()._session
+        session.send = partial(session.send, timeout=(10, 90))
         with TemporaryDirectory() as tmp:
             if args.mode == "daily":
                 daily(project, city, Path(tmp), pd.Timestamp.now(tz="UTC").normalize())
