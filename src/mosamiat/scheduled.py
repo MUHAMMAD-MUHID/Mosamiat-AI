@@ -200,6 +200,11 @@ def hourly(project, city, work, retry):
     app = build_graph(city, ledger, lambda: project, publish_inputs=publish_inputs, trainer=trainer)
 
     def issue(run_id, reference, replay):
+        if not retry and any(
+            event["status"] == "completed" for event in ledger.history(ledger.path, run_id)
+        ):
+            print(f"{run_id}: forecast already verified")
+            return
         ledger.restore_source(run_id)
         ledger.log(run_id, "started", "scheduled retry" if replay else "scheduled forecast")
         try:

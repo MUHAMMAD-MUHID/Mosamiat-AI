@@ -91,6 +91,33 @@ def test_disposable_runner_recovers_ledger_snapshot_and_rejects_corruption(tmp_p
         scheduled.ScheduledLedger(api, CITY, third)
 
 
+def test_hourly_skips_a_previously_completed_forecast(tmp_path, monkeypatch, capsys):
+    project = Mock()
+    api = DatasetFiles(tmp_path / "remote")
+    project.get_dataset_api.return_value = api
+    first = tmp_path / "first"
+    first.mkdir()
+    ledger = scheduled.ScheduledLedger(api, CITY, first)
+    now = pd.Timestamp("2026-11-27T07:12:00Z")
+    run_id = f"{CITY.city_id}_20261127T07Z"
+    ledger.log(run_id, "completed", "all agents verified")
+    ledger.log(run_id, "failed", "a later duplicate write failed")
+    ledger.save()
+    monkeypatch.setattr(
+        scheduled, "pd", SimpleNamespace(Timestamp=Mock(now=Mock(return_value=now)))
+    )
+    graph = Mock()
+    monkeypatch.setattr(scheduled, "build_graph", Mock(return_value=graph))
+
+    second = tmp_path / "second"
+    second.mkdir()
+    scheduled.hourly(project, CITY, second, retry=None)
+
+    graph.invoke.assert_not_called()
+    assert list(ledger.checkpoints.names()) == ledger.versions
+    assert f"{run_id}: forecast already verified" in capsys.readouterr().out
+
+
 def test_daily_restores_same_candidate_after_registry_failure(tmp_path, monkeypatch):
     project = Mock()
     project.get_dataset_api.return_value = DatasetFiles(tmp_path / "remote")
