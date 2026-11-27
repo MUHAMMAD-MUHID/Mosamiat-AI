@@ -166,7 +166,7 @@ def hostname(value: str) -> str:
     return parsed.hostname
 
 
-def connect_project():
+def connection_settings():
     # .env is local and ignored; existing environment values take precedence.
     from dotenv import load_dotenv
 
@@ -177,7 +177,13 @@ def connect_project():
     }
     if not all(settings.values()):
         raise CollectionError("Set HOPSWORKS_API_KEY, HOPSWORKS_PROJECT and HOPSWORKS_HOST in .env")
-    host = hostname(settings["HOST"])
+    settings["HOST"] = hostname(settings["HOST"])
+    return settings
+
+
+def connect_project():
+    settings = connection_settings()
+    host = settings["HOST"]
     # The SDK defaults to /tmp, which does not exist on many Windows machines.
     identity = hashlib.sha256(f"{host}/{settings['PROJECT']}".encode()).hexdigest()[:16]
     cert_folder = Path.cwd() / ".cache" / "hopsworks" / f"{identity}-{os.getpid()}"

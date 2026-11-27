@@ -19,6 +19,7 @@ from mosamiat.agents.graph import build_graph
 from mosamiat.agents.ledger import Ledger, _write_verified
 from mosamiat.agents.retraining import fit_candidate
 from mosamiat.backfill import digest, write_json
+from mosamiat.checkpoints import LEDGER_NAME
 from mosamiat.collect import City, CollectionError
 from mosamiat.hopsworks_compat import list_project_files
 from mosamiat.modeling.compare import promotion
@@ -28,7 +29,6 @@ from mosamiat.modeling.training import ARTIFACTS, train, verify_training
 from mosamiat.storage import connect_project, read_json
 
 SNAPSHOT = ("weather.json", "air_quality.json", "manifest.json", "hourly.csv")
-LEDGER_NAME = re.compile(r"ledger-(\d{10})-([0-9a-f]{64})\.zip")
 
 
 def pack(directory, names, path):
