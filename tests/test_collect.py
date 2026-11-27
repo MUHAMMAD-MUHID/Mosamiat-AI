@@ -298,6 +298,28 @@ def test_long_retry_after_fails_without_sending_early_retry(monkeypatch, retry_a
 
 
 @pytest.mark.parametrize(
+    "retry_after, expected_delays", [(None, [20, 40]), ("90", [90, 90]), ("121", [])]
+)
+def test_live_rate_limit_respects_bounded_cooldown(monkeypatch, retry_after, expected_delays):
+    delays = []
+    monkeypatch.setattr("mosamiat.collect.time.sleep", delays.append)
+
+    def handler(request):
+        if len(delays) == 2:
+            return httpx.Response(200, json={"ok": True})
+        headers = {"Retry-After": retry_after} if retry_after is not None else {}
+        return httpx.Response(429, headers=headers)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        if expected_delays:
+            assert fetch_json(client, "https://example.test", {}, live=True) == {"ok": True}
+        else:
+            with pytest.raises(CollectionError, match="cooldown"):
+                fetch_json(client, "https://example.test", {}, live=True)
+    assert delays == expected_delays
+
+
+@pytest.mark.parametrize(
     "start, end",
     [
         (date(2025, 1, 1), None),

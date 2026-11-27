@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import math
 import re
 import sys
@@ -97,7 +98,7 @@ def is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def fetch_json(client: httpx.Client, url: str, params: dict) -> dict:
+def fetch_json(client: httpx.Client, url: str, params: dict, *, live: bool = False) -> dict:
     """Retry only transient failures, with a bounded delay and attempt count."""
     for attempt in range(3):
         try:
@@ -108,18 +109,39 @@ def fetch_json(client: httpx.Client, url: str, params: dict) -> dict:
             time.sleep(2**attempt)
             continue
         if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+            live_rate_limit = live and response.status_code == 429
+            fallback = (20, 40)[attempt] if live_rate_limit else 2**attempt
             try:
-                delay = float(response.headers.get("Retry-After", 2**attempt))
+                delay = float(response.headers.get("Retry-After", fallback))
             except ValueError:
                 try:
                     retry_at = parsedate_to_datetime(response.headers["Retry-After"])
                     delay = (retry_at - datetime.now(UTC)).total_seconds()
                 except (ValueError, TypeError, OverflowError):
-                    delay = 2**attempt
-            if not math.isfinite(delay) or delay > 30:
+                    delay = fallback
+            limit = 120 if live_rate_limit else 30
+            if not math.isfinite(delay) or delay > limit:
+                logging.getLogger(__name__).warning(
+                    "%s returned HTTP %s with a cooldown outside the %ss retry budget",
+                    response.request.url.host,
+                    response.status_code,
+                    limit,
+                )
                 raise CollectionError("Provider requested a longer cooldown; retry the run later")
+            if live_rate_limit:
+                delay = max(fallback, delay)
+                logging.getLogger(__name__).warning(
+                    "%s returned HTTP 429; retrying in %.1fs (attempt %s of 3)",
+                    response.request.url.host,
+                    delay,
+                    attempt + 2,
+                )
             time.sleep(max(0, delay))
             continue
+        if response.status_code == 429:
+            logging.getLogger(__name__).error(
+                "%s still returned HTTP 429 after 3 attempts", response.request.url.host
+            )
         try:
             response.raise_for_status()
             payload = response.json()
@@ -290,7 +312,7 @@ def collect(
         rows = []
         for name, url, metrics, extra, product, kind in sources:
             params = common | window | extra | {"hourly": ",".join(metrics)}
-            payload = fetch_json(client, url, params)
+            payload = fetch_json(client, url, params, live=not historical)
             retrieved_at = datetime.now(UTC).isoformat()
             write_json(
                 run_dir / f"{name}.json",

@@ -47,7 +47,7 @@ jobs:
         if: env.PIPELINE == 'check'
         run: |
           uv run --no-sync ruff check src tests
-          uv run --no-sync pytest -q tests/test_scheduled.py tests/test_forecast_agent.py tests/test_drift.py tests/test_registry.py
+          uv run --no-sync pytest -q tests/test_collect.py tests/test_scheduled.py tests/test_forecast_agent.py tests/test_drift.py tests/test_registry.py
       - name: Run scheduled pipeline
         if: env.PIPELINE != 'check'
         env:
