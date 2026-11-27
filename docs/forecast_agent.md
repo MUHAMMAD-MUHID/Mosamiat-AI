@@ -25,6 +25,14 @@ Promotion requires at least 48 paired held-out cases, 95% coverage of eligible c
 
 Each forecast row identifies the city, UTC reference hour, actual issue time, target time, horizon, field, value, unit, method and version. It also records the source snapshot, retrieval time, input hash, evaluation hash and policy version. The first target is the next whole UTC hour. An issuance partway through an hour therefore has less than 60 minutes of lead time to that first target.
 
+### Forecast completion and retraining
+
+The forecast receives a `forecast_completed` event after the Hopsworks readback matches all 192 checkpointed predictions. The scheduled worker publishes that checkpoint before bulletin publication or drift monitoring. A retry reads the same run's remote rows first. It skips a complete match, upserts only missing keys in a matching partial write, and rejects conflicting rows. It verifies the full run after any repair.
+
+Drift assessment, drift report readback, and retraining have separate audit events. A failed retraining records the request and exception type, emits a warning in the workflow log, and publishes a drift record with `training_status=failed`. The forecast remains available. The dashboard loads the latest verified forecast and can compute its alerts before the bulletin is verified. It continues showing the latest available verified report.
+
+On 27 November 2026, GitHub run `45965017499` successfully read back its input features and then failed before forecast readback. Hopsworks execution `309020` logged a Spark abort while Hudi committed metadata for the forecast upsert. Its exception chain ended with `ArrayIndexOutOfBoundsException` in the metadata write, including the `column_stats` partition. The captured logs identify a backend materialization failure. The table and model registry were left intact. [GitHub job](https://github.com/MUHAMMAD-MUHID/Mosamiat-AI/actions/runs/45965017499/job/140391523667) · [Hopsworks job history](https://eu-west.cloud.hopsworks.ai/p/59511/jobs/named/mosamiat_forecast_ledger_1_offline_fg_materialization/executions)
+
 The local SQLite ledger at `data/forecasts/ledger.sqlite3` checkpoints the first complete forecast for a city and reference hour before uploading. An attempt log records starts, completed preparation, failures and successful readbacks. The remote primary key identifies one field and horizon in the hourly run. A repeat on the same ledger uses the saved payload, including the original issue time. The remote write uses upsert. Replaying a prepared forecast after an interruption works even after the original hour has passed.
 
 ```powershell

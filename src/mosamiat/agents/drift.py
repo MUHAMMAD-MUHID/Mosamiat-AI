@@ -129,7 +129,8 @@ def evaluate(city, payload, ledger, root, policy=None):
     with closing(sqlite3.connect(ledger.path)) as db:
         rows = db.execute(
             """SELECT payload FROM runs WHERE json_extract(payload,'$.city_id')=?
-            AND EXISTS (SELECT 1 FROM events WHERE events.run_id=runs.run_id AND status='verified')
+                    AND EXISTS (SELECT 1 FROM events WHERE events.run_id=runs.run_id
+                                AND status IN ('verified','forecast_completed'))
             AND json_extract(payload,'$.reference_at_utc') >= ?
             AND json_extract(payload,'$.reference_at_utc') < ?""",
             (

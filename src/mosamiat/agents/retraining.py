@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import sys
 from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
@@ -72,19 +73,23 @@ def fit_candidate(city, request, root, store):
 
 def run_drift(city, payload, ledger, store, root=Path("data/drift"), trainer=None, *, policy=None):
     decision = checkpoint(ledger, payload, lambda: evaluate(city, payload, ledger, root, policy))
+    ledger.log(payload["run_id"], "drift_assessed", f"{decision['drift_count']} crossings")
     result = dict(decision, candidate_sha256="", training_status="not_requested")
     if decision["request_id"]:
         try:
             request = decision["request_id"]
             result["candidate_sha256"] = (
-                trainer(city, request, root) if trainer else fit_candidate(city, request, root, store)
+                trainer(city, request, root)
+                if trainer
+                else fit_candidate(city, request, root, store)
             )
             result["training_status"] = "candidate_evaluated"
+            ledger.log(payload["run_id"], "retraining_completed", request)
         except Exception as error:
             result["training_status"] = "failed"
-            ledger.log(payload["run_id"], "retraining_failed", type(error).__name__)
-            publish_drift(store, result)
-            raise
+            detail = f"{request}: {type(error).__name__}"
+            ledger.log(payload["run_id"], "retraining_failed", detail)
+            print(f"{payload['run_id']}: retraining failed ({detail})", file=sys.stderr)
     publish_drift(store, result)
     ledger.log(
         payload["run_id"],

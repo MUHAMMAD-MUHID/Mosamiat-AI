@@ -203,7 +203,7 @@ class ScheduledLedger(Ledger):
             ]
 
 
-def publish_inputs(store, payload):
+def publish_inputs(store, payload, *, reconcile=False):
     frame = pd.DataFrame([payload["input_features"]], dtype=float)
     frame = frame.assign(
         run_id=payload["run_id"],
@@ -221,6 +221,7 @@ def publish_inputs(store, payload):
         "reference_at_utc",
         ["reference_at_utc", "retrieved_at_utc"],
         "Past-only feature row used by the forecast model.",
+        reconcile=reconcile,
     )
 
 
@@ -246,7 +247,14 @@ def train_on_drift(project, city, request, root):
 def hourly(project, city, work, retry):
     ledger = ScheduledLedger(project.get_dataset_api(), city, work)
     trainer = partial(train_on_drift, project)
-    app = build_graph(city, ledger, lambda: project, publish_inputs=publish_inputs, trainer=trainer)
+    app = build_graph(
+        city,
+        ledger,
+        lambda: project,
+        publish_inputs=publish_inputs,
+        trainer=trainer,
+        checkpoint_forecast=ledger.save,
+    )
 
     def issue(run_id, reference, replay):
         if not retry and any(
@@ -260,7 +268,9 @@ def hourly(project, city, work, retry):
             state = app.invoke(
                 dict(run_id=run_id, reference_at_utc=reference.isoformat(), retry=replay)
             )
-            ledger.log(run_id, "completed", "All four agents finished")
+            ledger.log(
+                run_id, "completed", "Hourly graph finished; see drift and retraining events"
+            )
         except Exception as error:
             ledger.log(run_id, "failed", type(error).__name__)
             raise

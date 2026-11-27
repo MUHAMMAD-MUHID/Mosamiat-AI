@@ -112,7 +112,8 @@ class Ledger:
             return result
 
 
-def publish(store, payload):
+def publish(store, payload, *, reconcile=False):
+    forecast_hours(payload)
     metadata = {
         k: v
         for k, v in payload.items()
@@ -131,6 +132,7 @@ def publish(store, payload):
         "target_at_utc",
         timestamps,
         "Hourly Islamabad model forecasts with source and model versions.",
+        reconcile=reconcile,
     )
 
 
@@ -149,6 +151,10 @@ def publish_bulletin(store, result):
     )
 
 
+class MaterializationError(CollectionError):
+    """A Hopsworks offline write failed or did not reach a terminal state."""
+
+
 def _wait_for_materialization(job, name, timeout=360):
     deadline = time.monotonic() + timeout
     execution_id = None
@@ -162,14 +168,16 @@ def _wait_for_materialization(job, name, timeout=360):
             if current.success is True:
                 return
             if current.success is False:
-                raise CollectionError(f"{name} materialization {execution_id} failed")
+                raise MaterializationError(f"{name} materialization {execution_id} failed")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise CollectionError(f"{name} materialization {execution_id} exceeded {timeout}s")
+            raise MaterializationError(f"{name} materialization {execution_id} exceeded {timeout}s")
         time.sleep(min(5, remaining))
 
 
-def _write_verified(store, frame, name, key, event_time, timestamps, description):
+def _write_verified(
+    store, frame, name, key, event_time, timestamps, description, *, reconcile=False
+):
     group = store.get_or_create_feature_group(
         name=name,
         version=1,
@@ -182,26 +190,47 @@ def _write_verified(store, frame, name, key, event_time, timestamps, description
     )
     if list(group.primary_key) != [key] or group.event_time != event_time:
         raise CollectionError(f"Incompatible {name} keys")
-    print(f"Publishing {len(frame)} rows to {name}", flush=True)
-    job, _ = group.insert(frame, operation="upsert", wait=False)
+
+    def read():
+        print(f"Reading back {name}", flush=True)
+        actual = (
+            group.select_all()
+            .filter(group.run_id == frame.run_id.iloc[0])
+            .read(read_options={"arrow_flight_config": {"timeout": 90}})
+        )
+        if not actual.empty:
+            for column in timestamps:
+                actual[column] = pd.to_datetime(actual[column], utc=True)
+        return actual
+
+    def verify(expected, actual):
+        if len(actual) != len(expected) or set(actual.columns) != set(expected.columns):
+            raise CollectionError(f"{name} readback differs from the saved run")
+        try:
+            pd.testing.assert_frame_equal(
+                expected.set_index(key).sort_index().sort_index(axis=1),
+                actual.set_index(key).sort_index().sort_index(axis=1),
+                check_dtype=False,
+                rtol=1e-9,
+                atol=1e-9,
+            )
+        except AssertionError as error:
+            raise CollectionError(f"{name} readback differs from the saved run") from error
+
+    pending = frame
+    if reconcile:
+        actual = read()
+        if not actual.empty:
+            matching = frame.loc[frame[key].isin(actual[key])]
+            verify(matching, actual)
+            pending = frame.loc[~frame[key].isin(actual[key])]
+            if pending.empty:
+                print(f"{name}: verified existing {len(actual)} rows", flush=True)
+                return actual
+    print(f"Publishing {len(pending)} rows to {name}", flush=True)
+    job, _ = group.insert(pending, operation="upsert", wait=False)
     if job is not None:
         _wait_for_materialization(job, name)
-    print(f"Reading back {name}", flush=True)
-    actual = (
-        group.select_all()
-        .filter(group.run_id == frame.run_id.iloc[0])
-        .read(read_options={"arrow_flight_config": {"timeout": 90}})
-    )
-    for column in timestamps:
-        actual[column] = pd.to_datetime(actual[column], utc=True)
-    try:
-        pd.testing.assert_frame_equal(
-            frame.set_index(key).sort_index().sort_index(axis=1),
-            actual.set_index(key).sort_index().sort_index(axis=1),
-            check_dtype=False,
-            rtol=1e-9,
-            atol=1e-9,
-        )
-    except AssertionError as error:
-        raise CollectionError(f"{name} readback differs from the saved run") from error
+    actual = read()
+    verify(frame, actual)
     return actual

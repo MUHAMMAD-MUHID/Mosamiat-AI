@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
 from mosamiat.agents.alerts import evaluate, forecast_hours
-from mosamiat.agents.ledger import Ledger, publish, publish_bulletin
+from mosamiat.agents.ledger import Ledger, MaterializationError, publish, publish_bulletin
 from mosamiat.agents.retraining import run_drift
 from mosamiat.backfill import digest
 from mosamiat.collect import City, CollectionError, collect
@@ -69,6 +69,7 @@ def build_graph(
     *,
     publish_inputs=None,
     trainer=None,
+    checkpoint_forecast=None,
 ):
     def prepare(state):
         run_id = state["run_id"]
@@ -142,10 +143,21 @@ def build_graph(
 
     def persist(state):
         store = project().get_feature_store()
-        if publish_inputs is not None:
-            publish_inputs(store, state["payload"])
-        publish(store, state["payload"])
-        ledger.log(state["run_id"], "verified", "192 remote forecast rows matched")
+        run_id = state["run_id"]
+        events = ledger.history(ledger.path, run_id)
+        reconcile = state.get("retry", False) or any(
+            event["status"] in {"forecast_write_started", "forecast_completed", "verified"}
+            for event in events
+        )
+        ledger.log(run_id, "forecast_write_started", "Persisting the immutable forecast payload")
+        inputs_verified = any(event["status"] == "forecast_inputs_verified" for event in events)
+        if publish_inputs is not None and not inputs_verified:
+            publish_inputs(store, state["payload"], reconcile=reconcile)
+            ledger.log(run_id, "forecast_inputs_verified", "Remote input row matched")
+        publish(store, state["payload"], reconcile=reconcile)
+        ledger.log(run_id, "forecast_completed", "192 remote forecast rows matched")
+        if checkpoint_forecast is not None:
+            checkpoint_forecast()
         return {"status": "verified"}
 
     def check_alerts(state):
@@ -160,6 +172,18 @@ def build_graph(
         return {"bulletin": bulletin}
 
     def drift(state):
+        try:
+            return monitor_drift(state)
+        except Exception as error:
+            detail = type(error).__name__
+            ledger.log(state["run_id"], "drift_failed", detail)
+            print(
+                f"{state['run_id']}: drift monitoring or reporting failed ({detail})",
+                file=sys.stderr,
+            )
+            return {"drift_result": {"monitoring_status": "failed", "drift_count": None}}
+
+    def monitor_drift(state):
         payload = state["payload"]
         policy = None
         if payload["evaluation_sha256"] != MANIFEST:
@@ -180,7 +204,12 @@ def build_graph(
             try:
                 return node(state)
             except Exception as error:
-                ledger.log(state["run_id"], "node_failed", f"{name}: {type(error).__name__}")
+                detail = (
+                    str(error) if isinstance(error, MaterializationError) else type(error).__name__
+                )
+                ledger.log(state["run_id"], "node_failed", f"{name}: {detail}")
+                if isinstance(error, MaterializationError):
+                    print(f"{state['run_id']}: {name}: {detail}", file=sys.stderr)
                 raise
 
         return run
@@ -243,16 +272,17 @@ def main(argv=None):
                 reference_at_utc=reference.isoformat(),
             )
         )
-        ledger.log(run_id, "completed", "All four agents finished")
+        ledger.log(run_id, "completed", "Hourly graph finished; see drift and retraining events")
     except Exception as error:
         message = str(error) if isinstance(error, CollectionError) else type(error).__name__
         ledger.log(run_id, "failed", message)
         print(f"Forecast {run_id} failed: {message}", file=sys.stderr)
         return 1
+    crossings = state["drift_result"]["drift_count"]
     print(
         f"{state['status']}: {run_id} ({len(state['payload']['forecasts'])} forecast rows, "
         f"{len(state['alerts'])} alert episodes, report {state['bulletin']['report_trigger']}, "
-        f"{state['drift_result']['drift_count']} drift thresholds crossed)"
+        f"{crossings if crossings is not None else 'unknown'} drift thresholds crossed)"
     )
     return 0
 

@@ -87,3 +87,28 @@ def test_checkpoint_and_worker_reuse_one_candidate(tmp_path, monkeypatch):
         CITY, same["request_id"], tmp_path, store
     )
     trainer.assert_called_once()
+
+
+def test_retraining_failure_is_reported_without_losing_the_drift_decision(
+    tmp_path, monkeypatch, capsys
+):
+    from mosamiat.agents.retraining import run_drift
+
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    payload = {"run_id": "hour", "city_id": CITY.city_id, "issued_at_utc": "2026-11-27T08:00:00Z"}
+    ledger.log("hour", "forecast_completed", "Readback verified")
+    assess = Mock(return_value={"run_id": "hour", "drift_count": 1})
+    publish = Mock()
+    monkeypatch.setattr("mosamiat.agents.retraining.evaluate", assess)
+    monkeypatch.setattr("mosamiat.agents.retraining.publish_drift", publish)
+    result = run_drift(CITY, payload, ledger, Mock(), trainer=Mock(side_effect=RuntimeError))
+    assert result["training_status"] == "failed"
+    assert result["drift_count"] == 1
+    assert publish.call_args.args[1] == result
+    assert [event["status"] for event in ledger.history(ledger.path, "hour")] == [
+        "forecast_completed",
+        "drift_assessed",
+        "retraining_failed",
+        "drift_verified",
+    ]
+    assert "RuntimeError" in capsys.readouterr().err
