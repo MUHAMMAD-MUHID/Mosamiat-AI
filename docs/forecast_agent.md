@@ -1,6 +1,6 @@
 # Islamabad Forecast Agent
 
-The Forecast node reads the two Open-Meteo products from one recent collector snapshot, downloads the pinned Hopsworks model bundle, and generates 24 hourly targets across eight fields. A second node writes the predictions to the `mosamiat_forecast_ledger` feature group, version 1, and reads the run back to verify the stored values, timestamps and model identities. Both nodes share the same LangGraph state. [LangGraph graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)
+The Forecast node reads the two Open-Meteo products from one recent collector snapshot, loads the active Hopsworks selection, and generates 24 hourly targets across eight fields. A second node writes the predictions to the `mosamiat_forecast_ledger` feature group, version 1, and reads the run back to verify the stored values, timestamps and model identities. Both nodes share the same LangGraph state. [LangGraph graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)
 
 ## Run one forecast
 
@@ -9,7 +9,7 @@ The first verified run was `islamabad_20261123T15Z`. It issued at 20:46 PKT on 2
 Use the project root and the Hopsworks credentials described in the [storage guide](storage.md).
 
 ```powershell
-& ./.tools/bootstrap/bin/uv.exe sync --locked --inexact --extra agents --extra storage --extra modeling
+& ./.tools/bootstrap/bin/uv.exe sync --locked --inexact --extra agents --extra storage --extra modeling --extra deep-learning
 & ./.venv/Scripts/python.exe -m mosamiat.agents.graph
 ```
 
@@ -17,9 +17,9 @@ The command collects weather and air-quality data if the hour has no prepared fo
 
 ## Which model supplies each field
 
-The initial policy compares the registered Random Forest v1 and the previous-day benchmark at each field and horizon. It reads validation scores from the checksum-verified registry bundle. Lower RMSE wins for continuous fields, lower circular mean absolute error wins for wind direction, and a tie retains the previous-day forecast. At horizon 24, that forecast uses the value 24 hours before the reference hour because the reference hour itself is incomplete.
+Each promoted field and horizon points to a checksummed registry artifact. The active selection lives under `Resources/mosamiat_islamabad/serving/`. Unpromoted cells use the original Random Forest v1 and seasonal-naive policy, with historical rain frequency for rain chance. The Forecast Agent uses that fallback if the active selection or its artifacts are unavailable. At horizon 24, seasonal naive uses the value 24 hours before the issue hour.
 
-Rain probability uses the training-period liquid-rain event frequency, approximately 11.05%, for all horizons. It is a constant benchmark with no hour-specific weather information. The primary validation window contained zero liquid-rain events. The decision applies only to the models available in this integration. [Model comparison](model_evaluation.md)
+Promotion requires at least 48 paired held-out cases, 95% coverage of eligible cases, and at least 1% lower error than both the incumbent and seasonal naive. Rain validation requires five wet and five dry cases. The gate scores continuous fields with RMSE, wind direction with circular MAE, and rain chance with Brier score. [Original model comparison](model_evaluation.md)
 
 ## Persistence and recovery
 
@@ -76,7 +76,7 @@ The fourth node runs after the bulletin and writes one decision per hourly run t
 
 - **Input drift.** The node checks 14 rolling means from the registered forest's input schema using the same 24 completed hours as inference. Each mean has a lower and upper limit taken from the 830 eligible training rows. Wind direction is represented by its sine and cosine. One crossing triggers a candidate fit. These limits describe the training season in Islamabad. A seasonal change alone can cross them.
 - **Forecast-error drift.** The first policy monitors the 24-hour lead for all eight fields. It matches previously verified forecasts to archived ERA5 weather and CAMS air-quality references by city, UTC target, method and version. Verification uses the latest seven-day archive window ending six UTC dates before the forecast's issue date. It requires 24 consecutive matched target hours per field. The upper limit is the largest 24-hour rolling validation error for the serving method. The scores are RMSE for continuous values, circular MAE for wind direction and Brier score against liquid-rain events for rain probability. Provider reference values can differ from local station observations.
-- **Retraining.** The first crossing checkpoints a request and runs the existing Random Forest trainer on the latest 61 archive days eligible at issue time, using chronological train, validation and test splits. Crossings within 24 hours share the request. A retry verifies and reuses a completed candidate. Its weights, scores, forecasts and manifest are stored together under `data/drift/candidates/<request_id>/evaluation/`. Serving continues with the registered version until a separate promotion decision compares the models on common validation cases.
+- **Retraining.** The first crossing checkpoints a request and uses the same trainers, registry readback, and promotion gate as the daily job. Requests within 24 hours share a training checkpoint. A retry verifies and reuses its saved evaluation.
 
 The checked-in monitoring profile belongs to the pinned v1 bundle. To reproduce it from the original local evaluations, run the following from the repository root.
 
@@ -86,7 +86,7 @@ The checked-in monitoring profile belongs to the pinned v1 bundle. To reproduce 
 
 Use the normal forecast command to run all four agents, or `--retry RUN_ID` to resume a saved forecast. Retain the source snapshot and the SQLite checkpoint for replay. New requests train locally on the graph worker. Hopsworks holds the team-visible decision record.
 
-For the saved `islamabad_20261123T15Z` forecast, the temperature and the sine component of wind direction crossed their training ranges. No archived t+24 forecast pairs were available. The resulting candidate trained and evaluated on the 18 September–17 November 2026 archive window. Its t+24 validation AQI RMSE was 19.93, compared with 18.77 for seasonal naive on the same 269 cases. The serving configuration remains pinned to v1.
+For the saved `islamabad_20261123T15Z` forecast, the temperature and the sine component of wind direction crossed their training ranges. No archived t+24 forecast pairs were available. The resulting candidate trained and evaluated on the 18 September–17 November 2026 archive window. Its t+24 validation AQI RMSE was 19.93, compared with 18.77 for seasonal naive on the same 269 cases.
 
 ## Scheduled pipelines
 
@@ -94,11 +94,28 @@ The **Mosamiat pipelines** GitHub Actions workflow runs from `main` on GitHub-ho
 
 | Pipeline | Schedule | Result |
 | --- | --- | --- |
-| Hourly | Minute 12 of every UTC hour | Publishes the exact model input row to `mosamiat_hourly_features` v1, verifies it by readback, then runs the forecast, bulletin and drift publications. |
-| Daily | 01:37 UTC (06:37 Pakistan time) | Fits and evaluates a Random Forest on 61 days of archived provider data ending six UTC dates before execution. Registers and reloads a candidate with the UTC date as the version (`YYYYMMDD`). The serving policy continues to use v1. |
+| Hourly | Minute 12 of every UTC hour | Checkpoints the source snapshot and verifies the Random Forest feature row in `mosamiat_hourly_features` v1. Runs forecast, bulletin, and drift publication. |
+| Daily | 01:37 UTC (06:37 Pakistan time) | Reads a verified Feature Store training snapshot, fits and evaluates Random Forest, SARIMAX, and LSTM, then registers candidates and evaluates promotion. |
 
 Actions can start later than the cron time. The forecast uses the actual UTC hour of execution. A missed hour leaves a gap. [GitHub scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 
 Hosted runs keep their own ledger, snapshots and candidate evaluations under `Resources/mosamiat_islamabad/` in the Hopsworks project. The first hosted run starts its own history. Run one scheduled publisher per city. A new runner restores the latest checksummed ledger. It resumes a prepared run interrupted by worker loss before issuing the current forecast. Each completed upload is checked before publication, and the two newest ledger generations are retained. Source snapshots and candidate bundles accumulate under this project directory.
 
 In **Actions → Mosamiat pipelines → Run workflow**, select **check** to exercise the workflows with fixtures, **daily** to train or verify today's candidate, or **hourly** to issue a current forecast. To replay a failed prepared forecast, select **hourly** and enter its run ID in the optional retry field. A daily retry on the same UTC date reuses the saved evaluation. Credentialed runs write to Hopsworks. The workflow log reports success only after readback.
+
+## Training verification
+
+The shared routine refreshes 61 days of retrospective provider references ending six UTC dates before the run. It writes past-derived features and matured hourly labels to `mosamiat_training_history` v1 and trains from the verified readback. Horizon joins discard targets that cross split boundaries. LSTM selects its stopping epoch within the training fold. SARIMAX covers temperature and humidity. Random Forest and LSTM cover all eight fields.
+
+On 27 November 2026, a credentialed verification read **1,464 hours** from Hopsworks. Fit and evaluation took **54.891 s** for Random Forest, **5.375 s** for SARIMAX, and **27.250 s** for LSTM. Each 24-hour validation score below used 269 eligible cases. Scores use retrospective provider references.
+
+| Model | AQI RMSE | Temperature RMSE (°C) | Humidity RMSE (percentage points) |
+| --- | ---: | ---: | ---: |
+| Seasonal naive | 23.94 | 0.91 | 6.11 |
+| Random Forest | 21.84 | 1.81 | 6.02 |
+| SARIMAX | — | 3.23 | 7.03 |
+| LSTM | 20.89 | 0.92 | 6.77 |
+
+Training artifacts contain full validation and test scores for every supported horizon. The `training_reports` folder in Hopsworks Resources records fit duration, verified registrations, and validation decisions. Daily model versions use `1000000000 + YYYYMMDD`. Drift versions use the UTC request timestamp in Unix seconds.
+
+The 27 November daily checkpoint registered and reloaded all three families as **v1020261127**. Its published selection promoted 91 field-and-horizon combinations, with 69 for Random Forest, 19 for LSTM, and three for SARIMAX. [Hopsworks project](https://eu-west.cloud.hopsworks.ai/p/59511)

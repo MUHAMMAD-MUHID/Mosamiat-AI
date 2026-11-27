@@ -1,19 +1,79 @@
 """Build an hourly forecast from the registered benchmark and one recent source revision."""
 
+import re
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
 
-from mosamiat.backfill import METRICS
+from mosamiat.backfill import METRICS, digest
 from mosamiat.collect import AIR, PROBABILITY, WEATHER, City, CollectionError
 from mosamiat.features.pipeline import transform
+from mosamiat.hopsworks_compat import list_project_files
 from mosamiat.modeling.baseline import FORECAST_METRICS
-from mosamiat.storage import load_snapshot
+from mosamiat.storage import load_snapshot, read_json
 
 MODEL = "mosamiat_islamabad_random_forest"
 VERSION = 1
 MANIFEST = "1487f5d407c6a4df2c6f5af7e5abd99d9a7abeebd04fb2b6d4b81cfe415ac726"
+POLICY_NAME = re.compile(r"policy-(\d{20})-([0-9a-f]{64})\.json")
+
+
+def read_policy(api, city, checksum=None):
+    folder = f"Resources/mosamiat_{city.city_id}/serving"
+    if not api.exists(folder):
+        return None, MANIFEST
+    matches = []
+    offset = 0
+    while True:
+        page = list_project_files(api, folder, offset=offset, limit=100)
+        for path in page:
+            name = path.rsplit("/", 1)[-1]
+            if (match := POLICY_NAME.fullmatch(name)) and (
+                checksum is None or match[2] == checksum
+            ):
+                matches.append(name)
+        if len(page) < 100:
+            break
+        offset += len(page)
+    if not matches:
+        return None, MANIFEST
+    name = max(matches)
+    expected = POLICY_NAME.fullmatch(name)[2]
+    with TemporaryDirectory() as temp:
+        path = Path(temp) / name
+        api.download(f"{folder}/{name}", local_path=str(path))
+        if digest(path) != expected:
+            raise CollectionError("Serving selection checksum mismatch")
+        policy = read_json(path)
+    if policy["schema_version"] != 1 or policy["city_id"] != city.city_id:
+        raise CollectionError("Serving selection is for a different schema or city")
+    return policy, expected
+
+
+def active_forecast(rows, policy, predictions):
+    specs = {m.name: m for m in (WEATHER | AIR | PROBABILITY).values()}
+    updated = []
+    for row in rows:
+        metric, horizon = row["metric"], row["horizon_hours"]
+        chosen = policy["models"].get(f"{metric}:{horizon}")
+        if chosen is None:
+            updated.append(row)
+            continue
+        name, version = chosen["name"], chosen["version"]
+        forecast_row = predictions[name, version].loc[horizon]
+        value = float(forecast_row[metric])
+        spec = specs[metric]
+        if (
+            forecast_row.target_at_utc != pd.Timestamp(row["target_at_utc"])
+            or not np.isfinite(value)
+            or (spec.minimum is not None and value < spec.minimum / spec.divisor)
+            or (spec.maximum is not None and value > spec.maximum / spec.divisor)
+        ):
+            raise CollectionError(f"Invalid active {metric} prediction at horizon {horizon}")
+        updated.append(dict(row, value=value, model_name=name, model_version=version))
+    return updated
 
 
 def recent_history(snapshot: Path, city: City, now: pd.Timestamp):

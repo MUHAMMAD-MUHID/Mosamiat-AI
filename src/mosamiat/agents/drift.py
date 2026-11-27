@@ -56,11 +56,11 @@ def input_checks(history, limits):
     return checks
 
 
-def error_checks(runs, actuals, start, stop, limits):
+def error_checks(runs, actuals, start, stop, limits, *, active=False):
     """Score at most the most recent 24 consecutive hourly target slots per metric."""
     forecasts = {field: {} for field in limits}
     for run in runs:
-        if run["evaluation_sha256"] != MANIFEST:
+        if not active and run["evaluation_sha256"] != MANIFEST:
             continue
         issued = pd.Timestamp(run["issued_at_utc"])
         for row in run["forecasts"]:
@@ -71,7 +71,7 @@ def error_checks(runs, actuals, start, stop, limits):
                 and start <= target < stop
                 and issued < target
                 and row["model_name"] == limits[field]["model"]
-                and row["model_version"] == VERSION
+                and row["model_version"] == limits[field].get("model_version", VERSION)
             ):
                 forecasts[field][target] = row["value"]
     checks = []
@@ -97,7 +97,7 @@ def error_checks(runs, actuals, start, stop, limits):
                 score=score,
                 upper=spec["upper"],
                 status="insufficient"
-                if score is None
+                if score is None or spec["upper"] is None
                 else "drift"
                 if score > spec["upper"] + 1e-9
                 else "within_limits",
@@ -106,10 +106,10 @@ def error_checks(runs, actuals, start, stop, limits):
     return checks
 
 
-def evaluate(city, payload, ledger, root):
+def evaluate(city, payload, ledger, root, policy=None):
     profile = read_json(PROFILE)
     if (
-        profile["evaluation_sha256"] != payload["evaluation_sha256"]
+        (policy is None and profile["evaluation_sha256"] != payload["evaluation_sha256"])
         or profile["city_id"] != payload["city_id"]
         or profile["evaluation_sha256"] != MANIFEST
     ):
@@ -151,13 +151,14 @@ def evaluate(city, payload, ledger, root):
         )
         actuals["wind_direction_deg"] = actuals.wind_direction_deg.where(actuals.wind_speed_mps > 0)
         actual_hash = digest(dataset / "manifest.json") + ":" + digest(labels)
-    checks.extend(error_checks(runs, actuals, start, stop, profile["errors"]))
+    limits = profile["errors"] | (policy["error_limits"] if policy else {})
+    checks.extend(error_checks(runs, actuals, start, stop, limits, active=policy is not None))
     return dict(
         run_id=payload["run_id"],
         city_id=city.city_id,
         issued_at_utc=issued.isoformat(),
         profile_sha256=digest(PROFILE),
-        evaluation_sha256=MANIFEST,
+        evaluation_sha256=payload["evaluation_sha256"],
         source_sha256=source_hash,
         archive_sha256=actual_hash,
         checks=checks,

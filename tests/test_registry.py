@@ -72,3 +72,23 @@ def test_registry_round_trip_reuses_version_and_rejects_changed_bytes(tmp_path, 
     with pytest.raises(CollectionError, match="checksum mismatch"):
         registry_module.register(*args)
     entry.save.assert_called_once()
+
+
+@pytest.mark.parametrize("challenger, expected", [(10.5, "lstm"), (13.0, None), (11.0, None)])
+def test_promotion_accepts_only_improvement_on_shared_validation_cases(challenger, expected):
+    from mosamiat.modeling.compare import validation_winner
+
+    frame = pd.DataFrame(
+        {
+            "eligible": [True] * 64,
+            "actual": 10.0,
+            "seasonal_naive": 12.0,
+            "incumbent": 11.0,
+            "lstm": challenger,
+            "random_forest": 11.0,
+        }
+    )
+    result = validation_winner("temperature_c", frame, ["lstm", "random_forest"])
+    assert result["winner"] == expected
+    frame.loc[:10, "lstm"] = np.nan
+    assert validation_winner("temperature_c", frame, ["lstm", "random_forest"])["winner"] is None

@@ -8,11 +8,8 @@ from uuid import uuid4
 
 import pandas as pd
 
-from mosamiat.agents.drift import archive, evaluate, publish_drift
-from mosamiat.backfill import digest
-from mosamiat.collect import CollectionError
-from mosamiat.modeling.classical import evaluate as train_forest
-from mosamiat.storage import read_json
+from mosamiat.agents.drift import evaluate, publish_drift
+from mosamiat.modeling.training import train, verify_training
 
 
 def checkpoint(ledger, payload, assess):
@@ -55,39 +52,32 @@ def checkpoint(ledger, payload, assess):
         return decision
 
 
-def fit_candidate(city, request, root):
+def fit_candidate(city, request, root, store):
     work = root / "candidates" / request
     work.mkdir(parents=True, exist_ok=True)
     output = work / "evaluation"
     # The process lock is released by SQLite if the worker exits, also during a fit.
     with closing(sqlite3.connect(work / "worker.sqlite3", timeout=10)) as worker, worker:
         worker.execute("BEGIN IMMEDIATE")
-        path = output / "manifest.json"
         if output.exists():
-            result = read_json(path)
-            if result.get("status") == "complete" and all(
-                digest(output / f) == h for f, h in result["sha256"].items()
-            ):
-                return digest(path)
-            raise CollectionError("Existing candidate evaluation failed integrity verification")
+            return verify_training(output)
         stamp = pd.to_datetime(request.rsplit("_", 1)[1], format="%Y%m%dT%H%M%SZ", utc=True)
-        end = stamp.normalize() - pd.Timedelta(days=6)
         # Isolate source and fitting locks from earlier interrupted attempts.
         attempt = work / f"fit-{uuid4().hex}"
         attempt.mkdir()
-        dataset, labels = archive(city, end - pd.Timedelta(days=60), end, attempt)
-        train_forest(dataset, attempt / "evaluation", city, labels, Path("configs/features.toml"))
+        checksum = train(store, city, stamp, attempt, attempt / "evaluation")
         (attempt / "evaluation").rename(output)
-        return digest(path)
+        return checksum
 
 
-def run_drift(city, payload, ledger, store, root=Path("data/drift"), trainer=None):
-    decision = checkpoint(ledger, payload, lambda: evaluate(city, payload, ledger, root))
+def run_drift(city, payload, ledger, store, root=Path("data/drift"), trainer=None, *, policy=None):
+    decision = checkpoint(ledger, payload, lambda: evaluate(city, payload, ledger, root, policy))
     result = dict(decision, candidate_sha256="", training_status="not_requested")
     if decision["request_id"]:
         try:
-            result["candidate_sha256"] = (trainer or fit_candidate)(
-                city, decision["request_id"], root
+            request = decision["request_id"]
+            result["candidate_sha256"] = (
+                trainer(city, request, root) if trainer else fit_candidate(city, request, root, store)
             )
             result["training_status"] = "candidate_evaluated"
         except Exception as error:

@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import time
 from contextlib import closing
 from functools import partial
 from pathlib import Path
@@ -14,32 +15,20 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
-from mosamiat.agents.drift import archive
 from mosamiat.agents.graph import build_graph
 from mosamiat.agents.ledger import Ledger, _write_verified
 from mosamiat.agents.retraining import fit_candidate
-from mosamiat.backfill import digest
+from mosamiat.backfill import digest, write_json
 from mosamiat.collect import City, CollectionError
-from mosamiat.features.pipeline import build
-from mosamiat.modeling.classical import evaluate
-from mosamiat.modeling.registry import register
-from mosamiat.storage import connect_project
+from mosamiat.hopsworks_compat import list_project_files
+from mosamiat.modeling.compare import promotion
+from mosamiat.modeling.inference import read_policy
+from mosamiat.modeling.registry import register_candidates
+from mosamiat.modeling.training import ARTIFACTS, train, verify_training
+from mosamiat.storage import connect_project, read_json
 
 SNAPSHOT = ("weather.json", "air_quality.json", "manifest.json", "hourly.csv")
-EVALUATION = (
-    "manifest.json",
-    "model.joblib",
-    "metrics.csv",
-    "cases.csv",
-    "rain_reliability.csv",
-    "rain_climatology.csv",
-)
-DAILY = tuple("evaluation/" + name for name in EVALUATION) + (
-    "features/features.csv",
-    "features/manifest.json",
-)
 LEDGER_NAME = re.compile(r"ledger-(\d{10})-([0-9a-f]{64})\.zip")
-CONFIG = Path("configs/features.toml")
 
 
 def pack(directory, names, path):
@@ -48,15 +37,23 @@ def pack(directory, names, path):
             bundle.write(directory / name, name)
 
 
-def unpack(path, names, directory):
+def unpack(path, names, directory, *, subset=False):
     with ZipFile(path) as bundle:
-        if sorted(bundle.namelist()) != sorted(names):
+        members = bundle.namelist()
+        if len(members) != len(set(members)) or (
+            not set(members).issubset(names) if subset else set(members) != set(names)
+        ):
             raise CollectionError("Unexpected checkpoint members")
-        for name in names:
+        for name in members:
             dest = directory / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             with bundle.open(name) as source, dest.open("wb") as out:
                 shutil.copyfileobj(source, out)
+
+
+def pack_training(output, bundle):
+    names = read_json(output / "manifest.json")["sha256"]
+    pack(output, ("manifest.json", *names), bundle)
 
 
 class Files:
@@ -71,7 +68,7 @@ class Files:
     def names(self):
         offset = 0
         while True:
-            page = self.api.list(self.folder, offset=offset, limit=100)
+            page = list_project_files(self.api, self.folder, offset=offset, limit=100)
             yield from (p.rsplit("/", 1)[-1] for p in page)
             if len(page) < 100:
                 break
@@ -85,12 +82,61 @@ class Files:
         with TemporaryDirectory() as tmp:
             stage = Path(tmp) / f"stage-{uuid4().hex}"
             shutil.copyfile(path, stage)
-            self.api.upload(str(stage), self.folder)
+            self.api.upload(str(stage), self.folder, chunk_size=1024 * 1024, simultaneous_chunks=1)
             check = Path(tmp) / "readback"
             self.download(stage.name, check)
             if digest(check) != digest(path):
                 raise CollectionError("Cloud checkpoint readback differs from upload")
             self.api.move(f"{self.folder}/{stage.name}", f"{self.folder}/{name}")
+
+
+def register_and_promote(project, city, output, version):
+    registry = project.get_model_registry()
+    candidates, registration_failures = register_candidates(registry, city, output, version)
+    training = read_json(output / "manifest.json")
+    if set(candidates) | set(registration_failures) != {
+        family for family, result in training["families"].items() if result["status"] == "complete"
+    }:
+        raise CollectionError("Registry verification did not cover each successful trainer")
+    api = project.get_dataset_api()
+    policy, previous_hash = read_policy(api, city)
+    updated, scores = (policy, {})
+    if training["status"] == "complete" and not registration_failures:
+        updated, scores = promotion(registry, city, output, candidates, policy)
+    changed = updated is not None and updated["models"] != (policy or {}).get("models", {})
+    with TemporaryDirectory() as temp:
+        path = Path(temp) / "report.json"
+        write_json(
+            path,
+            {
+                "version": version,
+                "training": training["families"],
+                "registered": candidates,
+                "registration_failures": registration_failures,
+                "incumbent_policy_sha256": previous_hash,
+                "validation": scores,
+                "proposed_policy": updated if changed else None,
+            },
+        )
+        reports = Files(api, city, "training_reports")
+        name = f"training-{version}-{digest(path)}.json"
+        if name not in reports.names():
+            reports.publish(path, name)
+        if changed:
+            if read_policy(api, city)[1] != previous_hash:
+                raise CollectionError("Active selection changed during validation; retry the run")
+            path = Path(temp) / "policy.json"
+            write_json(path, updated)
+            Files(api, city, "serving").publish(
+                path, f"policy-{time.time_ns():020d}-{digest(path)}.json"
+            )
+            print(f"Published serving selection from training version {version}")
+    if training["status"] != "complete":
+        raise CollectionError("Training was incomplete; successful registrations were retained")
+    if registration_failures:
+        raise CollectionError(
+            "Registry verification failed; successful registrations were retained"
+        )
 
 
 class ScheduledLedger(Ledger):
@@ -178,25 +224,28 @@ def publish_inputs(store, payload):
     )
 
 
-def hourly(project, city, work, retry):
-    api = project.get_dataset_api()
-    ledger = ScheduledLedger(api, city, work)
-    candidates = Files(api, city, "drift_candidates")
-
-    def trainer(city, request, root):
-        name = request + ".zip"
-        with TemporaryDirectory() as tmp:
-            path = Path(tmp) / "candidate.zip"
-            if name in candidates.names():
-                candidates.download(name, path)
-                unpack(path, EVALUATION, root / "candidates" / request / "evaluation")
-                # The existing worker verifies all saved model and metric hashes.
-                return fit_candidate(city, request, root)
-            checksum = fit_candidate(city, request, root)
-            pack(root / "candidates" / request / "evaluation", EVALUATION, path)
+def train_on_drift(project, city, request, root):
+    candidates = Files(project.get_dataset_api(), city, "drift_candidates")
+    name = request + "-v2.zip"
+    output = root / "candidates" / request / "evaluation"
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "candidate.zip"
+        if name in candidates.names():
+            candidates.download(name, path)
+            unpack(path, ARTIFACTS, output, subset=True)
+            checksum = verify_training(output)
+        else:
+            checksum = fit_candidate(city, request, root, project.get_feature_store())
+            pack_training(output, path)
             candidates.publish(path, name)
-            return checksum
+        issued = pd.to_datetime(request.rsplit("_", 1)[1], format="%Y%m%dT%H%M%SZ", utc=True)
+        register_and_promote(project, city, output, int(issued.timestamp()))
+        return checksum
 
+
+def hourly(project, city, work, retry):
+    ledger = ScheduledLedger(project.get_dataset_api(), city, work)
+    trainer = partial(train_on_drift, project)
     app = build_graph(city, ledger, lambda: project, publish_inputs=publish_inputs, trainer=trainer)
 
     def issue(run_id, reference, replay):
@@ -234,23 +283,21 @@ def hourly(project, city, work, retry):
 
 def daily(project, city, work, day):
     files = Files(project.get_dataset_api(), city, "daily_candidates")
-    name = f"{day:%Y%m%d}.zip"
+    name = f"{day:%Y%m%d}-v2.zip"
     bundle = work / name
+    output = work / "evaluation"
     if name in files.names():
         files.download(name, bundle)
-        unpack(bundle, DAILY, work)
+        unpack(bundle, ARTIFACTS, output, subset=True)
+        sha = verify_training(output)
     else:
-        end = day - pd.Timedelta(days=6)
-        dataset, labels = archive(city, end - pd.Timedelta(days=60), end, work)
-        build(dataset, work / "features", city, CONFIG)
-        evaluate(dataset, work / "evaluation", city, labels, CONFIG)
-        pack(work, DAILY, bundle)
+        sha = train(project.get_feature_store(), city, day, work, output)
+        pack_training(output, bundle)
         files.publish(bundle, name)
-    version = int(day.strftime("%Y%m%d"))
-    model, sha = register(
-        work / "evaluation", work / "features", version, project.get_model_registry
-    )
-    print(f"Verified daily candidate {model} v{version}, manifest {sha}")
+    # The new namespace preserves pre-existing YYYYMMDD Random Forest versions.
+    version = 1_000_000_000 + int(day.strftime("%Y%m%d"))
+    register_and_promote(project, city, output, version)
+    print(f"Verified daily training evaluation {day:%Y%m%d}, manifest {sha}")
 
 
 def main(argv=None):
@@ -266,7 +313,7 @@ def main(argv=None):
         from hopsworks_common import client
 
         session = client.get_instance()._session
-        session.send = partial(session.send, timeout=(10, 90))
+        session.send = partial(session.send, timeout=(60, 120))
         with TemporaryDirectory() as tmp:
             if args.mode == "daily":
                 daily(project, city, Path(tmp), pd.Timestamp.now(tz="UTC").normalize())

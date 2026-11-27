@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,7 +47,7 @@ class DatasetFiles:
             offset : offset + limit
         ]
 
-    def upload(self, local, remote):
+    def upload(self, local, remote, **options):
         shutil.copy(local, self.root / remote / Path(local).name)
 
     def download(self, remote, local_path):
@@ -118,28 +119,34 @@ def test_hourly_skips_a_previously_completed_forecast(tmp_path, monkeypatch, cap
     assert f"{run_id}: forecast already verified" in capsys.readouterr().out
 
 
-def test_daily_restores_same_candidate_after_registry_failure(tmp_path, monkeypatch):
+def test_daily_restores_same_shared_training_checkpoint(tmp_path, monkeypatch):
     project = Mock()
     project.get_dataset_api.return_value = DatasetFiles(tmp_path / "remote")
     day = pd.Timestamp("2026-11-24", tz="UTC")
-    archive = Mock(return_value=(tmp_path, tmp_path / "labels"))
-    monkeypatch.setattr(scheduled, "archive", archive)
 
-    def build(dataset, output, *args):
-        output.mkdir()
-        for name in ("features.csv", "manifest.json"):
-            (output / name).write_text(name)
-
-    def train(dataset, output, *args):
-        output.mkdir()
-        for name in scheduled.EVALUATION:
-            (output / name).write_text(name)
+    def train(store, city, cutoff, work, output):
+        assert cutoff == day
+        for name in scheduled.ARTIFACTS:
+            path = output / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+        (output / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "sha256": {
+                        name: "checksum" for name in scheduled.ARTIFACTS if name != "manifest.json"
+                    }
+                }
+            )
+        )
+        return "sha"
 
     fit = Mock(side_effect=train)
-    monkeypatch.setattr(scheduled, "build", build)
-    monkeypatch.setattr(scheduled, "evaluate", fit)
-    register = Mock(side_effect=[ConnectionError(), ("model", "sha")])
-    monkeypatch.setattr(scheduled, "register", register)
+    monkeypatch.setattr(scheduled, "train", fit)
+    verify = Mock(return_value="sha")
+    monkeypatch.setattr(scheduled, "verify_training", verify)
+    register = Mock(side_effect=[ConnectionError(), {}])
+    monkeypatch.setattr(scheduled, "register_and_promote", register)
     for attempt in (1, 2):
         work = tmp_path / str(attempt)
         work.mkdir()
@@ -148,8 +155,78 @@ def test_daily_restores_same_candidate_after_registry_failure(tmp_path, monkeypa
                 scheduled.daily(project, CITY, work, day)
         else:
             scheduled.daily(project, CITY, work, day)
-            assert (work / "evaluation/model.joblib").read_text() == "model.joblib"
+            assert (work / "evaluation/lstm/model.pt").read_text() == "lstm/model.pt"
     fit.assert_called_once()
-    _, start, end, _ = archive.call_args.args
-    assert (end - start).days == 60 and (day - end).days == 6
-    assert [call.args[2] for call in register.call_args_list] == [20261124, 20261124]
+    verify.assert_called_once()
+    assert [call.args[-1] for call in register.call_args_list] == [1020261124, 1020261124]
+
+
+def test_drift_worker_registers_and_reuses_shared_artifacts(tmp_path, monkeypatch):
+    from mosamiat.backfill import digest, write_json
+    from mosamiat.modeling.training import TRAINERS
+
+    project = Mock()
+    project.get_dataset_api.return_value = DatasetFiles(tmp_path / "remote")
+    request = "islamabad_20261127T070134Z"
+
+    def fit(city, request, root, store):
+        output = root / "candidates" / request / "evaluation"
+        checksums = {}
+        for name in scheduled.ARTIFACTS[1:]:
+            path = output / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+            checksums[name] = digest(path)
+        write_json(
+            output / "manifest.json",
+            {
+                "status": "complete",
+                "families": {name: {"status": "complete"} for name in TRAINERS},
+                "sha256": checksums,
+            },
+        )
+        return scheduled.verify_training(output)
+
+    trainer = Mock(side_effect=fit)
+    register = Mock()
+    monkeypatch.setattr(scheduled, "fit_candidate", trainer)
+    monkeypatch.setattr(scheduled, "register_and_promote", register)
+    first = scheduled.train_on_drift(project, CITY, request, tmp_path / "first")
+    assert scheduled.train_on_drift(project, CITY, request, tmp_path / "retry") == first
+    trainer.assert_called_once()
+    assert register.call_count == 2
+    assert register.call_args.args[-1] == int(pd.Timestamp("2026-11-27T07:01:34Z").timestamp())
+
+
+def test_promotion_updates_serving_only_when_gate_changes_selection(tmp_path, monkeypatch):
+    from mosamiat.backfill import write_json
+    from mosamiat.modeling.inference import read_policy
+
+    project = Mock()
+    api = DatasetFiles(tmp_path / "remote")
+    project.get_dataset_api.return_value = api
+    path = tmp_path / "evaluation"
+    path.mkdir()
+    write_json(
+        path / "manifest.json",
+        {
+            "status": "complete",
+            "families": {"lstm": {"status": "complete"}},
+        },
+    )
+    candidate = {"name": "lstm", "version": 7, "family": "lstm", "manifest_sha256": "a" * 64}
+    policy = {
+        "schema_version": 1,
+        "city_id": CITY.city_id,
+        "models": {"temperature_c:1": candidate},
+        "error_limits": {},
+    }
+    monkeypatch.setattr(
+        scheduled, "register_candidates", Mock(return_value=({"lstm": candidate}, {}))
+    )
+    monkeypatch.setattr(scheduled, "promotion", Mock(side_effect=[(policy, {}), (policy, {})]))
+    scheduled.register_and_promote(project, CITY, path, 7)
+    saved, checksum = read_policy(api, CITY)
+    assert saved == policy
+    scheduled.register_and_promote(project, CITY, path, 8)
+    assert read_policy(api, CITY) == (policy, checksum)

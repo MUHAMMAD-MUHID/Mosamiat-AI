@@ -1,6 +1,38 @@
 """Reuse authenticated project PEM files with the Hopsworks 4.8 Python client."""
 
+import os
+from functools import partial
 from pathlib import Path
+from posixpath import normpath
+
+
+def list_project_files(api, folder, *, offset, limit):
+    """Keep HopsFS paths POSIX on Windows with the pinned Hopsworks SDK."""
+    if os.name == "nt":
+        from hopsworks_common.core.dataset_api import DatasetApi, client, inode, util
+
+        if isinstance(api, DatasetApi):
+            _, items = api._list_dataset_path(normpath(folder), inode.Inode, offset, limit)
+            project = client.get_instance()._project_name
+            return [util.convert_to_project_rel_path(item.path, project) for item in items]
+    return api.list(folder, offset=offset, limit=limit)
+
+
+def save_registry_model(entry, folder):
+    """The SDK model upload config omits per-file chunk concurrency."""
+    from hsml.model import Model
+
+    config = {"chunk_size": 1024 * 1024, "simultaneous_uploads": 1}
+    if not isinstance(entry, Model):
+        return entry.save(folder, keep_original_files=True, upload_configuration=config)
+    api = entry._model_engine._engine._dataset_api
+    original = api.upload
+    # The service can try to assemble the file before parallel chunks arrive.
+    api.upload = partial(original, simultaneous_chunks=1)
+    try:
+        return entry.save(folder, keep_original_files=True, upload_configuration=config)
+    finally:
+        api.upload = original
 
 
 def configure_project_certificates() -> None:

@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     concurrency:
-      group: mosamiat-${{ inputs.pipeline || (github.event.schedule == '12 * * * *' && 'hourly') || (github.event.schedule == '37 1 * * *' && 'daily') || 'check' }}
+      group: mosamiat-${{ (inputs.pipeline == 'check' || github.event_name == 'push') && 'check' || 'live' }}
       cancel-in-progress: false
     env:
       PIPELINE: ${{ inputs.pipeline || (github.event.schedule == '12 * * * *' && 'hourly') || (github.event.schedule == '37 1 * * *' && 'daily') || 'check' }}
@@ -42,7 +42,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/bootstrap"
           "$RUNNER_TEMP/bootstrap/bin/pip" install uv==0.13.8
           echo "$RUNNER_TEMP/bootstrap/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/bootstrap/bin/uv" sync --locked --extra agents --extra storage --extra modeling
+          "$RUNNER_TEMP/bootstrap/bin/uv" sync --locked --extra agents --extra storage --extra modeling --extra deep-learning
       - name: Exercise both pipelines with offline fixtures
         if: env.PIPELINE == 'check'
         run: |

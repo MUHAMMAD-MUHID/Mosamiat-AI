@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from mosamiat.collect import City, CollectionError
-from mosamiat.modeling.evaluate import comparison_cases, publish_evaluation
+from mosamiat.modeling.evaluate import TrainingData, comparison_cases, publish_evaluation
 from mosamiat.modeling.metrics import score_predictions
 from mosamiat.reference import load_reference
 
@@ -81,10 +81,16 @@ def evaluate(
     city: City,
     validation_start: str | None = None,
     test_start: str | None = None,
+    *,
+    prepared: TrainingData | None = None,
 ) -> dict:
-    reference = load_reference(dataset, city)
+    if prepared is None:
+        reference = load_reference(dataset, city)
+        cases, manifest = comparison_cases(dataset, reference, city, validation_start, test_start)
+    else:
+        reference = prepared.reference
+        cases, manifest = prepared.cases, prepared.manifest.copy()
     reference.protect_output(dataset, output)
-    cases, manifest = comparison_cases(dataset, reference, city, validation_start, test_start)
     validation = pd.Timestamp(manifest["validation_start_utc"])
     cases = cases[cases.index.get_level_values("metric").isin(METRICS)].copy()
     models, predictions = {}, []

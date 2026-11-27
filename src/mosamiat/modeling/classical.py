@@ -11,7 +11,12 @@ import pandas as pd
 from mosamiat.backfill import digest
 from mosamiat.collect import City, CollectionError
 from mosamiat.features.pipeline import load_definitions, transform
-from mosamiat.modeling.evaluate import aligned_predictions, comparison_cases, publish_evaluation
+from mosamiat.modeling.evaluate import (
+    TrainingData,
+    aligned_predictions,
+    comparison_cases,
+    publish_evaluation,
+)
 from mosamiat.modeling.metrics import score_predictions
 from mosamiat.modeling.rain_labels import events
 from mosamiat.reference import load_reference
@@ -26,6 +31,8 @@ def evaluate(
     config: Path,
     validation_start: str | None = None,
     test_start: str | None = None,
+    *,
+    prepared: TrainingData | None = None,
 ) -> dict:
     try:
         import joblib
@@ -34,13 +41,21 @@ def evaluate(
     except ImportError as error:
         raise CollectionError("Install the modeling extra to fit Random Forests") from error
 
-    reference = load_reference(dataset, city)
-    reference.protect_output(dataset, output)
-    rain = events(read_json(rain_path), reference, city)
-    cases, manifest = comparison_cases(dataset, reference, city, validation_start, test_start, rain)
-    validation = pd.Timestamp(manifest["validation_start_utc"])
     definitions = load_definitions(config)
-    features = transform(reference.values, definitions, city.timezone)
+    if prepared is None:
+        reference = load_reference(dataset, city)
+        rain = events(read_json(rain_path), reference, city)
+        cases, manifest = comparison_cases(
+            dataset, reference, city, validation_start, test_start, rain
+        )
+        features = transform(reference.values, definitions, city.timezone)
+        rain_sha256 = digest(rain_path)
+    else:
+        reference, rain, features = prepared.reference, prepared.rain, prepared.features
+        cases, manifest = prepared.cases.copy(), prepared.manifest.copy()
+        rain_sha256 = prepared.rain_sha256
+    reference.protect_output(dataset, output)
+    validation = pd.Timestamp(manifest["validation_start_utc"])
     warmup = max(2, max(definitions["lags_hours"]), max(definitions["rolling_hours"]))
     forest = fit(features, reference.values, rain, validation, warmup)
 
@@ -82,7 +97,7 @@ def evaluate(
         sklearn_version=version("scikit-learn"),
         training_issue_counts=forest.training_counts,
         warmup_hours=warmup,
-        rain_label_sha256=digest(rain_path),
+        rain_label_sha256=rain_sha256,
         rain_event="ERA5 hourly liquid rain > 0 mm",
         rain_training_event_rate=prevalence,
     )

@@ -3,6 +3,7 @@
 import argparse
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +18,16 @@ from mosamiat.modeling.metrics import score_predictions
 from mosamiat.modeling.splits import split_targets
 from mosamiat.reference import ReferenceDataset, load_reference
 from mosamiat.storage import read_json
+
+
+@dataclass(frozen=True)
+class TrainingData:
+    reference: ReferenceDataset
+    features: pd.DataFrame
+    rain: pd.Series
+    cases: pd.DataFrame
+    manifest: dict
+    rain_sha256: str
 
 
 def boundary(value: str | None, index: pd.DatetimeIndex, percent: int) -> pd.Timestamp:

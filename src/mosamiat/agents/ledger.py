@@ -204,3 +204,4 @@ def _write_verified(store, frame, name, key, event_time, timestamps, description
         )
     except AssertionError as error:
         raise CollectionError(f"{name} readback differs from the saved run") from error
+    return actual

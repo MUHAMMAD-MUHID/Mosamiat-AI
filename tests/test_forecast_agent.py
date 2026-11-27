@@ -14,7 +14,10 @@ from mosamiat.modeling.baseline import FORECAST_METRICS
 from mosamiat.modeling.inference import MODEL, recent_history
 
 
-def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("use_active", [False, True])
+def test_live_graph_replays_prepared_forecast_after_publication_failure(
+    tmp_path, monkeypatch, use_active
+):
     graph = pytest.importorskip("mosamiat.agents.graph")
     with httpx.Client(
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json=response_payload(r)))
@@ -55,6 +58,16 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
     )
     loader = MagicMock(return_value=(forest, manifest, scores))
     monkeypatch.setattr(graph, "load_forecast_bundle", loader)
+    if use_active:
+        candidate = {"name": "mosamiat_islamabad_lstm", "version": 42, "family": "lstm"}
+        policy = {"models": {"temperature_c:1": candidate}, "error_limits": {}}
+        monkeypatch.setattr(graph, "read_policy", MagicMock(return_value=(policy, "a" * 64)))
+        monkeypatch.setattr(graph, "load_candidate", MagicMock(return_value=object()))
+        monkeypatch.setattr(
+            graph,
+            "candidate_predictions",
+            MagicMock(return_value=forest.predict.return_value.xs(reference, level=0)),
+        )
     project = MagicMock()
     group = (
         project.return_value.get_feature_store.return_value.get_or_create_feature_group.return_value
@@ -113,7 +126,7 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
         "weather_report",
         "drift",
     ]
-    assert bulletins.insert.call_args.args[0].iloc[0].report_trigger == "daily"
+    assert "daily" in bulletins.insert.call_args.args[0].iloc[0].report_trigger.split("+")
     assert drift_group.insert.call_args.args[0].iloc[0].run_id == "hourly"
     loader.assert_called_once()
     assert publish_inputs.call_args.args[1]["input_features"] == (
@@ -123,7 +136,15 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(tmp_path
     assert saved.forecast_id.nunique() == len(saved) == 192
     assert saved.target_at_utc.nunique() == 24
     assert saved.loc[saved.metric.eq("aqi_value"), "model_name"].eq(MODEL).all()
-    assert saved.loc[saved.metric.eq("temperature_c"), "model_name"].eq("seasonal_naive").all()
+    temperatures = saved.loc[saved.metric.eq("temperature_c")]
+    assert (
+        temperatures.loc[temperatures.horizon_hours.gt(1), "model_name"].eq("seasonal_naive").all()
+    )
+    assert temperatures.loc[temperatures.horizon_hours.eq(1), "model_name"].item() == (
+        "mosamiat_islamabad_lstm" if use_active else "seasonal_naive"
+    )
+    if use_active:
+        assert saved.evaluation_sha256.eq("a" * 64).all()
     assert saved.loc[saved.metric.eq("rain_probability"), "value"].eq(0.1).all()
     pd.testing.assert_frame_equal(saved, group.insert.call_args.args[0])
     read.side_effect = None

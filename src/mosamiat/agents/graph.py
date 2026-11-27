@@ -23,11 +23,13 @@ from mosamiat.modeling.inference import (
     MANIFEST,
     MODEL,
     VERSION,
+    active_forecast,
     forecast,
     issue_features,
+    read_policy,
     recent_history,
 )
-from mosamiat.modeling.registry import load_forecast_bundle
+from mosamiat.modeling.registry import candidate_predictions, load_candidate, load_forecast_bundle
 from mosamiat.storage import connect_project
 
 
@@ -86,9 +88,27 @@ def build_graph(
         if issued.floor("h") != reference:
             raise CollectionError("The forecast hour expired during ingestion")
         history, retrieved = recent_history(path, city, issued)
-        bundle = load_forecast_bundle(project().get_model_registry(), MODEL, VERSION, MANIFEST)
+        project_handle = project()
+        registry = project_handle.get_model_registry()
+        bundle = load_forecast_bundle(registry, MODEL, VERSION, MANIFEST)
         sample = issue_features(history, reference, city, bundle[1]["feature_definitions"])
         rows = forecast(history, reference, city, bundle, sample=sample)
+        evaluation_sha256 = MANIFEST
+        try:
+            policy, checksum = read_policy(project_handle.get_dataset_api(), city)
+            if policy:
+                predictions = {}
+                for item in policy["models"].values():
+                    key = (item["name"], item["version"])
+                    if key not in predictions:
+                        candidate = load_candidate(registry, item)
+                        predictions[key] = candidate_predictions(
+                            item["family"], candidate, history, reference, city
+                        )
+                rows = active_forecast(rows, policy, predictions)
+                evaluation_sha256 = checksum
+        except Exception as error:
+            ledger.log(run_id, "serving_fallback", type(error).__name__)
         inputs = {}
         if publish_inputs is not None:
             selected = sample[bundle[1]["features"]].iloc[0]
@@ -111,7 +131,7 @@ def build_graph(
                 snapshot_id=path.name,
                 snapshot_path=str(path.resolve()),
                 source_sha256=source_hash,
-                evaluation_sha256=MANIFEST,
+                evaluation_sha256=evaluation_sha256,
                 policy_version=1,
                 forecasts=rows,
                 **inputs,
@@ -140,9 +160,17 @@ def build_graph(
         return {"bulletin": bulletin}
 
     def drift(state):
+        payload = state["payload"]
+        policy = None
+        if payload["evaluation_sha256"] != MANIFEST:
+            policy, checksum = read_policy(
+                project().get_dataset_api(), city, payload["evaluation_sha256"]
+            )
+            if policy is None or checksum != payload["evaluation_sha256"]:
+                raise CollectionError("Missing drift profile for the forecast serving selection")
         return {
             "drift_result": run_drift(
-                city, state["payload"], ledger, project().get_feature_store(), trainer=trainer
+                city, payload, ledger, project().get_feature_store(), trainer=trainer, policy=policy
             )
         }
 
@@ -197,8 +225,16 @@ def main(argv=None):
     run_id = args.retry or f"{city.city_id}_{reference:%Y%m%dT%HZ}"
     ledger = Ledger(args.ledger)
     try:
+        from mosamiat.scheduled import train_on_drift
+
         ledger.log(run_id, "started", "retry" if args.retry else "hourly forecast")
-        graph = build_graph(city, ledger, cache(connect_project))
+        project = cache(connect_project)
+        graph = build_graph(
+            city,
+            ledger,
+            project,
+            trainer=lambda city, request, root: train_on_drift(project(), city, request, root),
+        )
         state = graph.invoke(
             dict(
                 run_id=run_id,

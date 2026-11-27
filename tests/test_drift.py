@@ -8,7 +8,6 @@ from test_collect import CITY
 from mosamiat.agents.drift import error_checks, input_checks
 from mosamiat.agents.ledger import Ledger
 from mosamiat.agents.retraining import checkpoint, fit_candidate
-from mosamiat.backfill import digest, write_json
 from mosamiat.modeling.inference import MANIFEST
 
 
@@ -74,23 +73,17 @@ def test_checkpoint_and_worker_reuse_one_candidate(tmp_path, monkeypatch):
     assert same["action"] == "cooldown" and same["request_id"] == first["request_id"]
     assert decide("2026-01-15T10:00:00+00:00") == first
     assert decide("2026-01-16T10:00:00+00:00")["request_id"] != first["request_id"]
-    archive = Mock(return_value=(tmp_path, tmp_path / "labels"))
-    monkeypatch.setattr("mosamiat.agents.retraining.archive", archive)
 
-    def train(dataset, output, *args):
+    def train(store, city, stamp, work, output):
+        assert stamp == pd.Timestamp("2026-01-15T10:00:00Z")
         output.mkdir()
-        (output / "model.joblib").write_bytes(b"candidate")
-        write_json(
-            output / "manifest.json",
-            {"status": "complete", "sha256": {"model.joblib": digest(output / "model.joblib")}},
-        )
+        return "sha"
 
     trainer = Mock(side_effect=train)
-    monkeypatch.setattr("mosamiat.agents.retraining.train_forest", trainer)
-    assert fit_candidate(CITY, first["request_id"], tmp_path) == fit_candidate(
-        CITY, same["request_id"], tmp_path
+    monkeypatch.setattr("mosamiat.agents.retraining.train", trainer)
+    monkeypatch.setattr("mosamiat.agents.retraining.verify_training", Mock(return_value="sha"))
+    store = Mock()
+    assert fit_candidate(CITY, first["request_id"], tmp_path, store) == fit_candidate(
+        CITY, same["request_id"], tmp_path, store
     )
     trainer.assert_called_once()
-    _, start, end, _ = archive.call_args.args
-    assert end - start == timedelta(days=60)
-    assert end.date().isoformat() == "2026-01-09"

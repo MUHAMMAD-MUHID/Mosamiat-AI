@@ -10,7 +10,12 @@ import pandas as pd
 
 from mosamiat.backfill import digest
 from mosamiat.collect import City, CollectionError
-from mosamiat.modeling.evaluate import aligned_predictions, comparison_cases, publish_evaluation
+from mosamiat.modeling.evaluate import (
+    TrainingData,
+    aligned_predictions,
+    comparison_cases,
+    publish_evaluation,
+)
 from mosamiat.modeling.metrics import score_predictions
 from mosamiat.modeling.rain_labels import events
 from mosamiat.reference import load_reference
@@ -24,21 +29,39 @@ def evaluate(
     rain_path: Path,
     validation_start: str | None = None,
     test_start: str | None = None,
+    *,
+    prepared: TrainingData | None = None,
 ) -> dict:
     try:
         from mosamiat.modeling.lstm import fit
     except ImportError as error:
         raise CollectionError("Install the deep-learning extra to train the LSTM") from error
 
-    reference = load_reference(dataset, city)
+    if prepared is None:
+        reference = load_reference(dataset, city)
+        rain = events(read_json(rain_path), reference, city)
+        cases, manifest = comparison_cases(
+            dataset, reference, city, validation_start, test_start, rain
+        )
+        rain_sha256 = digest(rain_path)
+    else:
+        reference, rain = prepared.reference, prepared.rain
+        cases, manifest = prepared.cases.copy(), prepared.manifest.copy()
+        rain_sha256 = prepared.rain_sha256
     reference.protect_output(dataset, output)
-    rain = events(read_json(rain_path), reference, city)
-    cases, manifest = comparison_cases(dataset, reference, city, validation_start, test_start, rain)
+    validation = pd.Timestamp(manifest["validation_start_utc"])
+    test = pd.Timestamp(manifest["test_start_utc"])
+    # Reserve the public validation fold for model selection in automated training.
+    fit_validation = validation
+    fit_test = test
+    if prepared is not None:
+        fit_test = validation
+        fit_validation = reference.values.index[reference.values.index.get_loc(validation) * 4 // 5]
     model, history, best_epoch = fit(
         reference.values,
         rain,
-        pd.Timestamp(manifest["validation_start_utc"]),
-        pd.Timestamp(manifest["test_start_utc"]),
+        fit_validation,
+        fit_test,
         city.timezone,
     )
     issues = cases.index.get_level_values("reference_at_utc").unique()
@@ -57,9 +80,11 @@ def evaluate(
         preprocessing=asdict(model.prep),
         best_epoch=best_epoch,
         epochs_run=len(history),
+        fitted_until_exclusive_utc=fit_test.isoformat(),
+        early_stopping_start_utc=fit_validation.isoformat(),
         lookback_hours=24,
         horizons_hours=list(range(1, 25)),
-        rain_label_sha256=digest(rain_path),
+        rain_label_sha256=rain_sha256,
         rain_event="ERA5 hourly liquid rain > 0 mm",
     )
     return publish_evaluation(
