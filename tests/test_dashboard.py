@@ -13,6 +13,15 @@ from mosamiat.agents.ledger import Ledger
 from mosamiat.collect import CollectionError
 
 
+@pytest.fixture
+def app_test():
+    streamlit = pytest.importorskip("streamlit")
+    testing = pytest.importorskip("streamlit.testing.v1")
+    streamlit.cache_data.clear()
+    yield testing.AppTest
+    streamlit.cache_data.clear()
+
+
 def issue(ledger, hour, *, completed=True):
     data = payload(f"2026-11-24T{hour}:00Z") | {"city_id": CITY.city_id}
     ledger.prepare(data)
@@ -56,8 +65,7 @@ def test_outlook_uses_verified_forecast_before_bulletin_and_after_retraining_fai
 
 
 @pytest.mark.parametrize("event", [None, "bulletin_failed", "node_failed"])
-def test_bulletin_tab_explains_pending_or_failed_publication(tmp_path, monkeypatch, event):
-    testing = pytest.importorskip("streamlit.testing.v1")
+def test_bulletin_tab_explains_pending_or_failed_publication(tmp_path, monkeypatch, app_test, event):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     first = issue(ledger, "07")
     latest = issue(ledger, "08", completed=False)
@@ -69,7 +77,7 @@ def test_bulletin_tab_explains_pending_or_failed_publication(tmp_path, monkeypat
     assert result.hours.shape == (24, 8)
     assert result.report_issued == pd.Timestamp(first["issued_at_utc"])
     monkeypatch.setattr(dashboard, "load_outlook", lambda city: (result, "Local verified ledger"))
-    app = testing.AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+    app = app_test.from_file("streamlit_app.py", default_timeout=15).run()
     assert not app.exception
     if event:
         assert result.bulletin_status == "failed"
@@ -116,15 +124,14 @@ def test_cloud_download_checksum_and_offline_fallback(tmp_path, monkeypatch):
         dashboard.load_outlook(CITY, cache.parent, tmp_path / "absent")
 
 
-def test_desk_unit_switching_window_and_hour_comparison(tmp_path, monkeypatch):
-    testing = pytest.importorskip("streamlit.testing.v1")
+def test_desk_unit_switching_window_and_hour_comparison(tmp_path, monkeypatch, app_test):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     issue(ledger, "07")
     outlook = dashboard.read_outlook(ledger.path, CITY)
     outlook.alerts = evaluate(forecast_hours(payload("2025-01-01T05:00Z", aqi_value=152)))
     outlook.hours.iloc[12, outlook.hours.columns.get_loc("temperature_c")] = 30
     monkeypatch.setattr(dashboard, "load_outlook", lambda city: (outlook, "Local verified ledger"))
-    app = testing.AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+    app = app_test.from_file("streamlit_app.py", default_timeout=15).run()
     assert not app.exception
     assert [tab.label for tab in app.tabs] == ["Overview", "Hourly explorer", "Alerts", "Bulletin"]
     app.radio[0].set_value("°F")
