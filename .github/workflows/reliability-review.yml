@@ -1,0 +1,50 @@
+name: Mosamiat reliability review
+
+on:
+  push:
+    branches: [review/mosamiat-reliability]
+    paths: ['.github/workflows/reliability-review.yml', 'src/**', 'tests/**', 'pyproject.toml', 'uv.lock']
+
+permissions:
+  contents: read
+
+jobs:
+  reserve:
+    name: Reserve drift attempt on first worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - &checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - &install
+        name: Install locked test environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bootstrap"
+          "$RUNNER_TEMP/bootstrap/bin/pip" install uv==0.13.8
+          echo "$RUNNER_TEMP/bootstrap/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bootstrap/bin/uv" sync --locked --extra agents --extra storage --extra modeling --extra deep-learning
+      - name: Reserve and checkpoint
+        run: uv run --no-sync python tests/verify_drift_checkpoint.py reserve "$RUNNER_TEMP/drift"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-drift-checkpoint
+          path: ${{ runner.temp }}/drift/remote/Resources/mosamiat_islamabad/ledgers/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  restore:
+    name: Restore and enforce the limit on a new worker
+    needs: reserve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - *checkout
+      - *install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: synthetic-drift-checkpoint
+          path: ${{ runner.temp }}/drift/remote/Resources/mosamiat_islamabad/ledgers
+      - name: Restore and enforce the cap
+        run: uv run --no-sync python tests/verify_drift_checkpoint.py restore "$RUNNER_TEMP/drift"

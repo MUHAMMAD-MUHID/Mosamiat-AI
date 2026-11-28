@@ -34,7 +34,7 @@ class DatasetFiles:
 
     def __init__(self, root):
         self.root = root
-        (root / "Resources").mkdir(parents=True)
+        (root / "Resources").mkdir(parents=True, exist_ok=True)
 
     def exists(self, remote):
         return (self.root / remote).exists()
