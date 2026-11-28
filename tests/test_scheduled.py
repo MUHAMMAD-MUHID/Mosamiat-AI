@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+import requests
 from test_collect import CITY
 
 scheduled = pytest.importorskip("mosamiat.scheduled")
@@ -19,14 +20,13 @@ def test_materialization_polls_original_job_and_bounds_wait(monkeypatch):
     finished = SimpleNamespace(id=12, success=True)
     unrelated = SimpleNamespace(id=13, success=False)
     job = Mock()
-    job.get_executions.side_effect = [[running], [unrelated, finished]]
-    ledger._wait_for_materialization(job, "features")
+    job.get_executions.side_effect = [[unrelated], [unrelated, running], [unrelated, finished]]
+    assert ledger._wait_for_materialization(job, "features", 12)
     job.get_executions.side_effect = [[running]]
     with pytest.raises(scheduled.CollectionError, match="exceeded"):
-        ledger._wait_for_materialization(job, "features", timeout=0)
+        ledger._wait_for_materialization(job, "features", 12, timeout=0)
     job.get_executions.side_effect = [[unrelated]]
-    with pytest.raises(scheduled.CollectionError, match="failed"):
-        ledger._wait_for_materialization(job, "features")
+    assert not ledger._wait_for_materialization(job, "features", 13)
 
 
 class DatasetFiles:
@@ -73,11 +73,14 @@ def test_disposable_runner_recovers_ledger_snapshot_and_rejects_corruption(tmp_p
         (source / name).write_text(name)
     ledger.log("run1", "started", "scheduled forecast")
     ledger.prepare(dict(run_id="run1", snapshot_id="sample", snapshot_path=str(source)))
+    ledger.record_materialization("run1", "features", None)
     second = tmp_path / "second"
     second.mkdir()
     monkeypatch.chdir(second)
     resumed = scheduled.ScheduledLedger(api, CITY, second)
     assert resumed.interrupted() == ["run1"]
+    assert resumed.materialization("run1", "features") == (None,)
+    resumed.record_materialization("run1", "features", 12, previous=(None,))
     resumed.restore_source("run1")
     assert Path(resumed.get("run1")["snapshot_path"], "weather.json").read_text() == "weather.json"
     resumed.log("run1", "completed", "all four agents")
@@ -85,11 +88,40 @@ def test_disposable_runner_recovers_ledger_snapshot_and_rejects_corruption(tmp_p
     resumed.save()
     assert len(list(resumed.checkpoints.names())) == 2
     assert resumed.interrupted() == []
+    assert scheduled.ScheduledLedger(api, CITY, second).materialization(
+        "run1", "features"
+    ) == (12,)
     (api.root / resumed.checkpoints.folder / resumed.versions[-1]).write_bytes(b"broken")
     third = tmp_path / "third"
     third.mkdir()
     with pytest.raises(scheduled.CollectionError, match="checksum"):
         scheduled.ScheduledLedger(api, CITY, third)
+
+
+def test_interrupted_attempts_consume_drift_budget_across_cloud_checkpoints(tmp_path):
+    from mosamiat.agents.retraining import MAX_TRAINING_ATTEMPTS, reserve_attempt
+
+    api = DatasetFiles(tmp_path / "remote")
+    request = "islamabad_20261127T070134Z"
+    for index in range(MAX_TRAINING_ATTEMPTS + 1):
+        worker = tmp_path / f"worker-{index}"
+        worker.mkdir()
+        ledger = scheduled.ScheduledLedger(api, CITY, worker)
+        # Simulate interruption after the durable reservation but before any outcome.
+        assert reserve_attempt(ledger, request) == (index < MAX_TRAINING_ATTEMPTS, None)
+
+
+def test_stale_worker_cannot_replace_a_materialization_record(tmp_path):
+    from mosamiat.agents.ledger import Ledger
+
+    first = Ledger(tmp_path / "ledger.sqlite3")
+    other = Ledger(first.path)
+    previous = other.materialization("hour", "features")
+    first.record_materialization("hour", "features", None)
+    first.record_materialization("hour", "features", 12, previous=(None,))
+    with pytest.raises(scheduled.CollectionError, match="record changed"):
+        other.record_materialization("hour", "features", None, previous=previous)
+    assert first.materialization("hour", "features") == (12,)
 
 
 def test_hourly_skips_a_previously_completed_forecast(tmp_path, monkeypatch, capsys):
@@ -117,6 +149,39 @@ def test_hourly_skips_a_previously_completed_forecast(tmp_path, monkeypatch, cap
     graph.invoke.assert_not_called()
     assert list(ledger.checkpoints.names()) == ledger.versions
     assert f"{run_id}: forecast already verified" in capsys.readouterr().out
+
+
+def test_failed_checkpoint_preserves_safe_launch_error(tmp_path, monkeypatch, capsys):
+    from hopsworks_common import client
+
+    from mosamiat.agents.ledger import MaterializationError
+
+    project = Mock()
+    project.get_dataset_api.return_value = DatasetFiles(tmp_path / "remote")
+    monkeypatch.setattr(scheduled, "connect_project", lambda: project)
+    monkeypatch.setattr(client, "get_instance", lambda: SimpleNamespace(_session=Mock()))
+    response = requests.Response()
+    response.status_code = 503
+    response.url = "https://service.test/?key=launch-secret"
+    launch = requests.HTTPError("unsafe-auth-header", response=response)
+    failure = MaterializationError(
+        "submit_materialization", "mosamiat_forecast_ledger", None, "unknown outcome", error=launch,
+    )
+    graph = Mock()
+    graph.invoke.side_effect = failure
+    monkeypatch.setattr(scheduled, "build_graph", Mock(return_value=graph))
+    monkeypatch.setattr(
+        scheduled.ScheduledLedger, "save", Mock(side_effect=OSError("checkpoint-secret")),
+    )
+    assert scheduled.main(["hourly"]) == 1
+    error_log = capsys.readouterr().err
+    assert "failure checkpoint could not be saved (OSError)" in error_log
+    assert "hourly pipeline failed (operation=submit_materialization" in error_log
+    assert "feature_group=mosamiat_forecast_ledger execution_id=unknown" in error_log
+    assert "http=503 category=5xx" in error_log
+    assert all(secret not in error_log for secret in (
+        "launch-secret", "unsafe-auth-header", "checkpoint-secret",
+    ))
 
 
 def test_daily_restores_same_shared_training_checkpoint(tmp_path, monkeypatch):

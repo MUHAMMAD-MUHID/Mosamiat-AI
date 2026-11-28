@@ -29,6 +29,7 @@ def test_outlook_uses_latest_completed_issue_and_dates_earlier_report(tmp_path):
     issue(ledger, "09", completed=False)
     result = dashboard.read_outlook(ledger.path, CITY)
     assert result.run_id == second["run_id"]
+    assert result.bulletin_status == "verified"
     assert result.report_issued == pd.Timestamp(first["issued_at_utc"])
     assert result.hours.shape == (24, 8)
     assert result.hours.index[0].hour == 14
@@ -38,15 +39,45 @@ def test_outlook_uses_latest_completed_issue_and_dates_earlier_report(tmp_path):
 def test_outlook_uses_verified_forecast_before_bulletin_and_after_retraining_failure(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     first = issue(ledger, "07")
-    data = payload("2026-11-24T08:00Z") | {"city_id": CITY.city_id}
+    data = payload("2026-11-24T08:00Z", aqi_value=154) | {"city_id": CITY.city_id}
     ledger.prepare(data)
     ledger.log(data["run_id"], "forecast_completed", "Remote forecast readback matched")
+    failed = ledger.bulletin(CITY, data, evaluate(forecast_hours(data)))
+    assert failed["report_trigger"] == "new_alert"
+    ledger.log(data["run_id"], "bulletin_failed", "Terminal materialization failure")
+    ledger.log(data["run_id"], "completed", "Forecast verified with a bulletin failure")
     ledger.log(data["run_id"], "retraining_failed", "RuntimeError")
     issue(ledger, "09", completed=False)
     result = dashboard.read_outlook(ledger.path, CITY)
     assert result.run_id == data["run_id"]
+    assert result.bulletin_status == "failed"
     assert result.report_issued == pd.Timestamp(first["issued_at_utc"])
     assert result.hours.shape == (24, 8)
+
+
+@pytest.mark.parametrize("event", [None, "bulletin_failed", "node_failed"])
+def test_bulletin_tab_explains_pending_or_failed_publication(tmp_path, monkeypatch, event):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    first = issue(ledger, "07")
+    latest = issue(ledger, "08", completed=False)
+    ledger.log(latest["run_id"], "forecast_completed", "192 remote forecast rows matched")
+    if event:
+        ledger.log(latest["run_id"], event, "weather_report: materialization failed")
+    result = dashboard.read_outlook(ledger.path, CITY)
+    assert result.run_id == latest["run_id"]
+    assert result.hours.shape == (24, 8)
+    assert result.report_issued == pd.Timestamp(first["issued_at_utc"])
+    monkeypatch.setattr(dashboard, "load_outlook", lambda city: (result, "Local verified ledger"))
+    app = testing.AppTest.from_file("streamlit_app.py", default_timeout=15).run()
+    assert not app.exception
+    if event:
+        assert result.bulletin_status == "failed"
+        assert any("Bulletin publication failed" in warning.value for warning in app.warning)
+    else:
+        assert result.bulletin_status == "pending"
+        assert any("Bulletin verification is pending" in item.value for item in app.caption)
+    assert any("Published for the" in item.value for item in app.caption)
 
 
 def test_cloud_download_checksum_and_offline_fallback(tmp_path, monkeypatch):

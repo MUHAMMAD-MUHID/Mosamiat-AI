@@ -14,7 +14,7 @@ Open the terminal's local URL. The page checks for updates every five minutes wh
 - **Alerts** filters published threshold crossings by status and severity. Switch the audience for specific guidance, or open the evidence for the peak value, threshold and original units.
 - **Bulletin** displays the published report with its original issue time and units.
 
-The dashboard reads the scheduler's checksum-addressed ledger in Hopsworks and selects the latest verified forecast by issue time. It checks coverage and units before displaying the eight fields for all 24 forecast hours. Rain probability is stored as a fraction and displayed as a percentage. If its bulletin is still pending, the dashboard computes alerts from the verified forecast and keeps the latest verified report. Drift and retraining have separate statuses.
+The dashboard reads the scheduler's checksum-addressed ledger in Hopsworks and selects the latest verified forecast by issue time. It checks coverage and units before displaying the eight fields for all 24 forecast hours. Rain probability is stored as a fraction and displayed as a percentage. The Bulletin tab distinguishes pending verification from a publication failure. In either case the dashboard computes alerts from the verified forecast and displays the latest verified report when available. Drift and retraining have separate statuses.
 
 A verified copy is cached under the ignored `data/dashboard/` directory. If Hopsworks is unavailable, the page labels the cached source or uses the local verified ledger. An expired forecast is marked on the page.
 

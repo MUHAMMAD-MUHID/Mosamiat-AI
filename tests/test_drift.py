@@ -3,11 +3,12 @@ from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
+import pytest
 from test_collect import CITY
 
 from mosamiat.agents.drift import error_checks, input_checks
 from mosamiat.agents.ledger import Ledger
-from mosamiat.agents.retraining import checkpoint, fit_candidate
+from mosamiat.agents.retraining import MAX_TRAINING_ATTEMPTS, checkpoint, fit_candidate, run_drift
 from mosamiat.modeling.inference import MANIFEST
 
 
@@ -92,8 +93,6 @@ def test_checkpoint_and_worker_reuse_one_candidate(tmp_path, monkeypatch):
 def test_retraining_failure_is_reported_without_losing_the_drift_decision(
     tmp_path, monkeypatch, capsys
 ):
-    from mosamiat.agents.retraining import run_drift
-
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     payload = {"run_id": "hour", "city_id": CITY.city_id, "issued_at_utc": "2026-11-27T08:00:00Z"}
     ledger.log("hour", "forecast_completed", "Readback verified")
@@ -112,3 +111,31 @@ def test_retraining_failure_is_reported_without_losing_the_drift_decision(
         "drift_verified",
     ]
     assert "RuntimeError" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("succeeds", [False, True])
+def test_drift_reuses_success_or_caps_attempts_after_worker_restarts(tmp_path, monkeypatch, succeeds):
+    monkeypatch.setattr(
+        "mosamiat.agents.retraining.evaluate",
+        lambda city, payload, *args: dict(run_id=payload["run_id"], drift_count=1),
+    )
+    monkeypatch.setattr("mosamiat.agents.retraining.publish_drift", Mock())
+    trainer = Mock(return_value="verified-candidate", side_effect=None if succeeds else RuntimeError)
+    path = tmp_path / "ledger.sqlite3"
+    results = []
+    for hour in range(10, 10 + MAX_TRAINING_ATTEMPTS + 2):
+        payload = dict(
+            run_id=f"hour-{hour}",
+            city_id=CITY.city_id,
+            issued_at_utc=f"2026-11-27T{hour}:00:00Z",
+        )
+        results.append(run_drift(CITY, payload, Ledger(path), Mock(), trainer=trainer))
+    assert len({result["request_id"] for result in results}) == 1
+    if succeeds:
+        trainer.assert_called_once()
+        assert all(result["candidate_sha256"] == "verified-candidate" for result in results)
+    else:
+        assert trainer.call_count == MAX_TRAINING_ATTEMPTS
+        assert [result["training_status"] for result in results] == (
+            ["failed"] * MAX_TRAINING_ATTEMPTS + ["attempt_limit_reached"] * 2
+        )

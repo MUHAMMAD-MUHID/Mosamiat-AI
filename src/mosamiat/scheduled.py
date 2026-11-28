@@ -16,7 +16,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 
 from mosamiat.agents.graph import build_graph
-from mosamiat.agents.ledger import Ledger, _write_verified
+from mosamiat.agents.ledger import Ledger, _write_verified, safe_error_detail
 from mosamiat.agents.retraining import fit_candidate
 from mosamiat.backfill import digest, write_json
 from mosamiat.checkpoints import LEDGER_NAME
@@ -153,6 +153,9 @@ class ScheduledLedger(Ledger):
             unpack(bundle, ("ledger.sqlite3",), directory)
         super().__init__(directory / "ledger.sqlite3")
 
+    def checkpoint(self):
+        self.save()
+
     def save(self):
         with TemporaryDirectory() as tmp:
             bundle = Path(tmp) / "ledger.zip"
@@ -203,7 +206,7 @@ class ScheduledLedger(Ledger):
             ]
 
 
-def publish_inputs(store, payload, *, reconcile=False):
+def publish_inputs(store, payload, *, reconcile=False, ledger=None):
     frame = pd.DataFrame([payload["input_features"]], dtype=float)
     frame = frame.assign(
         run_id=payload["run_id"],
@@ -222,6 +225,7 @@ def publish_inputs(store, payload, *, reconcile=False):
         ["reference_at_utc", "retrieved_at_utc"],
         "Past-only feature row used by the forecast model.",
         reconcile=reconcile,
+        ledger=ledger,
     )
 
 
@@ -272,11 +276,20 @@ def hourly(project, city, work, retry):
                 run_id, "completed", "Hourly graph finished; see drift and retraining events"
             )
         except Exception as error:
-            ledger.log(run_id, "failed", type(error).__name__)
+            try:
+                ledger.log(run_id, "failed", safe_error_detail(error))
+                ledger.save()
+            except Exception as checkpoint_error:
+                print(
+                    f"{run_id}: failure checkpoint could not be saved ({type(checkpoint_error).__name__})",
+                    file=sys.stderr,
+                )
             raise
-        finally:
-            ledger.save()
-        print(f"{run_id}: verified {len(state['payload']['forecasts'])} forecast rows")
+        ledger.save()
+        print(
+            f"{run_id}: verified {len(state['payload']['forecasts'])} forecast rows"
+            f", bulletin {state['bulletin_status']}"
+        )
 
     resumed = [retry] if retry else ledger.interrupted()
     for run_id in resumed:
@@ -330,8 +343,7 @@ def main(argv=None):
             else:
                 hourly(project, city, Path(tmp), args.retry)
     except Exception as error:
-        # SDK exception text can contain authentication information.
-        print(f"{args.mode} pipeline failed ({type(error).__name__})", file=sys.stderr)
+        print(f"{args.mode} pipeline failed ({safe_error_detail(error)})", file=sys.stderr)
         return 1
     return 0
 

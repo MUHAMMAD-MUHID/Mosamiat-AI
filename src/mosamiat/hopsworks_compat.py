@@ -4,6 +4,29 @@ import os
 from functools import partial
 from pathlib import Path
 from posixpath import normpath
+from threading import Lock, get_ident
+
+_MATERIALIZATION_HOOK_LOCK = Lock()
+
+
+def insert_with_execution(group, frame, job, submit):
+    """Observe the SDK's launch on this cached job while preserving its Kafka offsets."""
+    if job is None:
+        return group.insert(frame, operation="upsert", wait=False)
+    owner = get_ident()
+    with _MATERIALIZATION_HOOK_LOCK:
+        original = job.run
+
+        def tracked_run(*args, **kwargs):
+            if get_ident() == owner:
+                return submit(original, *args, **kwargs)
+            return original(*args, **kwargs)
+
+        job.run = tracked_run
+        try:
+            return group.insert(frame, operation="upsert", wait=False)
+        finally:
+            job.run = original
 
 
 def list_project_files(api, folder, *, offset, limit):

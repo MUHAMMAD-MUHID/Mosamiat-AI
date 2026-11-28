@@ -10,12 +10,17 @@ from typing import TypedDict
 
 import httpx
 import pandas as pd
-import requests
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
 from mosamiat.agents.alerts import evaluate, forecast_hours
-from mosamiat.agents.ledger import Ledger, MaterializationError, publish, publish_bulletin
+from mosamiat.agents.ledger import (
+    Ledger,
+    MaterializationError,
+    publish,
+    publish_bulletin,
+    safe_error_detail,
+)
 from mosamiat.agents.retraining import run_drift
 from mosamiat.backfill import digest
 from mosamiat.collect import City, CollectionError, collect
@@ -42,23 +47,8 @@ class ForecastState(TypedDict, total=False):
     status: str
     alerts: list[dict]
     bulletin: dict
+    bulletin_status: str
     drift_result: dict
-
-
-def _publication_interrupted(error):
-    if isinstance(error, (requests.exceptions.SSLError, requests.exceptions.ProxyError)):
-        return False
-    return isinstance(
-        error,
-        (
-            ConnectionError,
-            TimeoutError,
-            httpx.NetworkError,
-            httpx.TimeoutException,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-        ),
-    )
 
 
 def build_graph(
@@ -152,9 +142,9 @@ def build_graph(
         ledger.log(run_id, "forecast_write_started", "Persisting the immutable forecast payload")
         inputs_verified = any(event["status"] == "forecast_inputs_verified" for event in events)
         if publish_inputs is not None and not inputs_verified:
-            publish_inputs(store, state["payload"], reconcile=reconcile)
+            publish_inputs(store, state["payload"], reconcile=reconcile, ledger=ledger)
             ledger.log(run_id, "forecast_inputs_verified", "Remote input row matched")
-        publish(store, state["payload"], reconcile=reconcile)
+        publish(store, state["payload"], reconcile=reconcile, ledger=ledger)
         ledger.log(run_id, "forecast_completed", "192 remote forecast rows matched")
         if checkpoint_forecast is not None:
             checkpoint_forecast()
@@ -166,16 +156,26 @@ def build_graph(
         return {"alerts": alerts}
 
     def weather_report(state):
-        bulletin = ledger.bulletin(city, state["payload"], state["alerts"])
-        publish_bulletin(project().get_feature_store(), bulletin)
-        ledger.log(state["run_id"], "bulletin_verified", bulletin["report_trigger"])
-        return {"bulletin": bulletin}
+        run_id = state["run_id"]
+        try:
+            bulletin = ledger.bulletin(city, state["payload"], state["alerts"])
+            publish_bulletin(
+                project().get_feature_store(), bulletin, reconcile=state.get("retry", False),
+                ledger=ledger,
+            )
+        except Exception as error:
+            detail = safe_error_detail(error)
+            ledger.log(run_id, "bulletin_failed", detail)
+            print(f"::warning::Weather bulletin unavailable for {run_id} ({detail})", file=sys.stderr)
+            return {"bulletin": {}, "bulletin_status": "failed"}
+        ledger.log(run_id, "bulletin_verified", bulletin["report_trigger"])
+        return {"bulletin": bulletin, "bulletin_status": "verified"}
 
     def drift(state):
         try:
             return monitor_drift(state)
         except Exception as error:
-            detail = type(error).__name__
+            detail = safe_error_detail(error)
             ledger.log(state["run_id"], "drift_failed", detail)
             print(
                 f"{state['run_id']}: drift monitoring or reporting failed ({detail})",
@@ -204,9 +204,7 @@ def build_graph(
             try:
                 return node(state)
             except Exception as error:
-                detail = (
-                    str(error) if isinstance(error, MaterializationError) else type(error).__name__
-                )
+                detail = safe_error_detail(error)
                 ledger.log(state["run_id"], "node_failed", f"{name}: {detail}")
                 if isinstance(error, MaterializationError):
                     print(f"{state['run_id']}: {name}: {detail}", file=sys.stderr)
@@ -214,8 +212,10 @@ def build_graph(
 
         return run
 
-    # Both publication steps upsert and read back the original checkpointed payload.
-    publication_retry = RetryPolicy(max_attempts=3, retry_on=_publication_interrupted)
+    publication_retry = RetryPolicy(
+        max_attempts=3,
+        retry_on=lambda error: isinstance(error, MaterializationError) and error.retryable,
+    )
     graph = StateGraph(ForecastState)
     for name, node in (
         ("forecast", prepare),
@@ -224,7 +224,7 @@ def build_graph(
         ("weather_report", weather_report),
         ("drift", drift),
     ):
-        policy = publication_retry if name in {"save_forecasts", "weather_report"} else None
+        policy = publication_retry if name == "save_forecasts" else None
         graph.add_node(name, audited(name, node), retry_policy=policy)
     graph.add_edge(START, "forecast")
     graph.add_edge("forecast", "save_forecasts")
@@ -274,14 +274,14 @@ def main(argv=None):
         )
         ledger.log(run_id, "completed", "Hourly graph finished; see drift and retraining events")
     except Exception as error:
-        message = str(error) if isinstance(error, CollectionError) else type(error).__name__
+        message = safe_error_detail(error)
         ledger.log(run_id, "failed", message)
         print(f"Forecast {run_id} failed: {message}", file=sys.stderr)
         return 1
     crossings = state["drift_result"]["drift_count"]
     print(
         f"{state['status']}: {run_id} ({len(state['payload']['forecasts'])} forecast rows, "
-        f"{len(state['alerts'])} alert episodes, report {state['bulletin']['report_trigger']}, "
+        f"{len(state['alerts'])} alert episodes, bulletin {state['bulletin_status']}, "
         f"{crossings if crossings is not None else 'unknown'} drift thresholds crossed)"
     )
     return 0

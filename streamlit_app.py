@@ -350,12 +350,16 @@ def page():
         alert_center(outlook, now)
     with report:
         with st.container(border=True, key="panel_report"):
+            if outlook.bulletin_status == "failed":
+                st.warning("Bulletin publication failed for this forecast.")
+            elif outlook.bulletin_status == "pending":
+                st.caption("Bulletin verification is pending for this forecast.")
             if outlook.report:
                 st.caption(
                     f"Published for the {stamp(outlook.report_issued)} forecast · Original units"
                 )
                 st.markdown(outlook.report)
-            else:
+            elif outlook.bulletin_status == "verified":
                 st.subheader("Weather bulletin")
                 st.info("A verified weather report is not yet available.")
     with st.expander("Forecast sources and credits"):

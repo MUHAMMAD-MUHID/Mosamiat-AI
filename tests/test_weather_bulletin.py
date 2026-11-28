@@ -64,7 +64,9 @@ def test_daily_alert_escalation_expiry_and_replay(tmp_path):
 
     def issue(time, aqi):
         data = payload(time, aqi_value=aqi)
-        return ledger.bulletin(CITY, data, evaluate(forecast_hours(data)))
+        result = ledger.bulletin(CITY, data, evaluate(forecast_hours(data)))
+        ledger.log(data["run_id"], "bulletin_verified", result["report_trigger"])
+        return result
 
     first = issue("2026-11-23T13:00Z", 70)
     assert first["report_trigger"] == "daily" and "None of" in first["report"]
@@ -77,6 +79,16 @@ def test_daily_alert_escalation_expiry_and_replay(tmp_path):
     assert issue("2026-11-23T17:00Z", 70)["alerts"] == []
     assert issue("2026-11-23T18:00Z", 151)["report_trigger"] == "new_alert"
     assert issue("2026-11-23T19:00Z", 151)["report_trigger"] == "daily"
+
+
+def test_failed_daily_bulletin_does_not_suppress_the_next_report(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    first = payload("2026-11-23T13:00Z")
+    assert ledger.bulletin(CITY, first, [])["report_trigger"] == "daily"
+    ledger.log(first["run_id"], "bulletin_failed", "Materialization failed")
+    ledger.log(first["run_id"], "completed", "Forecast verified")
+    next_hour = payload("2026-11-23T14:00Z")
+    assert ledger.bulletin(CITY, next_hour, [])["report_trigger"] == "daily"
 
 
 def test_incomplete_forecast_cannot_be_reported_as_clear():

@@ -12,6 +12,8 @@ import pandas as pd
 from mosamiat.agents.drift import evaluate, publish_drift
 from mosamiat.modeling.training import train, verify_training
 
+MAX_TRAINING_ATTEMPTS = 2
+
 
 def checkpoint(ledger, payload, assess):
     run_id = payload["run_id"]
@@ -71,20 +73,47 @@ def fit_candidate(city, request, root, store):
         return checksum
 
 
+def reserve_attempt(ledger, request):
+    with closing(sqlite3.connect(ledger.path)) as db, db:
+        db.execute("""CREATE TABLE IF NOT EXISTS retrain_attempts (
+            request_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, checksum TEXT)""")
+        db.execute("BEGIN IMMEDIATE")
+        count, checksum = db.execute(
+            "SELECT attempts, checksum FROM retrain_attempts WHERE request_id=?", (request,)
+        ).fetchone() or (0, None)
+        if checksum is not None or count >= MAX_TRAINING_ATTEMPTS:
+            return False, checksum
+        db.execute(
+            "INSERT INTO retrain_attempts VALUES (?, 1, NULL) "
+            "ON CONFLICT(request_id) DO UPDATE SET attempts=attempts+1", (request,)
+        )
+    # Reserve before invoking the trainer so a terminated worker consumes an attempt.
+    ledger.checkpoint()
+    return True, None
+
+
 def run_drift(city, payload, ledger, store, root=Path("data/drift"), trainer=None, *, policy=None):
     decision = checkpoint(ledger, payload, lambda: evaluate(city, payload, ledger, root, policy))
     ledger.log(payload["run_id"], "drift_assessed", f"{decision['drift_count']} crossings")
     result = dict(decision, candidate_sha256="", training_status="not_requested")
-    if decision["request_id"]:
+    request = decision["request_id"]
+    if request:
         try:
-            request = decision["request_id"]
-            result["candidate_sha256"] = (
-                trainer(city, request, root)
-                if trainer
-                else fit_candidate(city, request, root, store)
-            )
-            result["training_status"] = "candidate_evaluated"
-            ledger.log(payload["run_id"], "retraining_completed", request)
+            reserved, checksum = reserve_attempt(ledger, request)
+            if reserved:
+                checksum = (trainer(city, request, root) if trainer
+                            else fit_candidate(city, request, root, store))
+                with closing(sqlite3.connect(ledger.path)) as db, db:
+                    db.execute(
+                        "UPDATE retrain_attempts SET checksum=? WHERE request_id=?", (checksum, request)
+                    )
+                ledger.checkpoint()
+                ledger.log(payload["run_id"], "retraining_completed", request)
+            if checksum is not None:
+                result.update(candidate_sha256=checksum, training_status="candidate_evaluated")
+            else:
+                result["training_status"] = "attempt_limit_reached"
+                ledger.log(payload["run_id"], "retraining_attempt_limit", request)
         except Exception as error:
             result["training_status"] = "failed"
             detail = f"{request}: {type(error).__name__}"

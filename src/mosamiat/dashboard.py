@@ -16,7 +16,7 @@ import pandas as pd
 
 from mosamiat.agents.alerts import evaluate, forecast_hours
 from mosamiat.backfill import digest
-from mosamiat.checkpoints import LEDGER_NAME
+from mosamiat.checkpoints import LEDGER_NAME, VERIFIED_BULLETIN
 from mosamiat.collect import City, CollectionError
 from mosamiat.storage import connection_settings
 
@@ -42,20 +42,26 @@ class Outlook:
     alerts: list[dict]
     report: str
     report_issued: pd.Timestamp | None
+    bulletin_status: str
 
 
 def read_outlook(path: Path, city: City) -> Outlook:
     uri = path.resolve().as_uri() + "?mode=ro"
-    verified = """WITH verified AS (
+    verified = f"""WITH verified AS (
         SELECT b.content, b.has_report, r.payload,
                json_extract(r.payload, '$.issued_at_utc') AS issued_at_utc,
                coalesce(min(CASE WHEN e.status IN ('forecast_completed', 'verified') THEN e.at_utc END),
-                        max(e.at_utc)) AS verified_at
+                        max(e.at_utc)) AS verified_at,
+               CASE WHEN b.run_id IS NOT NULL THEN 'verified'
+                    WHEN EXISTS (
+                        SELECT 1 FROM events v WHERE v.run_id=r.run_id
+                        AND (v.status='bulletin_failed'
+                             OR (v.status='node_failed' AND v.detail LIKE 'weather_report:%'))
+                    ) THEN 'failed'
+                    ELSE 'pending'
+               END AS bulletin_status
         FROM runs r JOIN events e USING(run_id)
-        LEFT JOIN bulletins b ON b.run_id = r.run_id AND EXISTS (
-            SELECT 1 FROM events v WHERE v.run_id = r.run_id
-            AND v.status IN ('bulletin_verified', 'completed')
-        )
+        LEFT JOIN bulletins b ON b.run_id = r.run_id AND {VERIFIED_BULLETIN}
         WHERE json_extract(r.payload, '$.city_id') = ?
           AND e.status IN ('forecast_completed', 'verified', 'completed')
         GROUP BY r.run_id
@@ -63,7 +69,7 @@ def read_outlook(path: Path, city: City) -> Outlook:
     with closing(sqlite3.connect(uri, uri=True)) as db:
         db.execute("BEGIN")
         entry = db.execute(
-            verified + "SELECT payload, content, verified_at FROM verified "
+            verified + "SELECT payload, content, verified_at, bulletin_status FROM verified "
             "ORDER BY issued_at_utc DESC LIMIT 1",
             (city.city_id,),
         ).fetchone()
@@ -92,6 +98,7 @@ def read_outlook(path: Path, city: City) -> Outlook:
         bulletin["alerts"] if bulletin else evaluate(forecast),
         report.get("report", ""),
         pd.Timestamp(report["issued_at_utc"]).tz_convert(city.timezone) if report else None,
+        entry[3],
     )
 
 
