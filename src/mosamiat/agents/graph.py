@@ -42,6 +42,7 @@ class ForecastState(TypedDict, total=False):
     status: str
     alerts: list[dict]
     bulletin: dict
+    bulletin_status: str
     drift_result: dict
 
 
@@ -166,10 +167,22 @@ def build_graph(
         return {"alerts": alerts}
 
     def weather_report(state):
-        bulletin = ledger.bulletin(city, state["payload"], state["alerts"])
-        publish_bulletin(project().get_feature_store(), bulletin)
+        # Forecast persistence was verified by save_forecasts. Bulletin storage
+        # failure must not invalidate an already-verified forecast.
+        try:
+            bulletin = ledger.bulletin(city, state["payload"], state["alerts"])
+            publish_bulletin(project().get_feature_store(), bulletin)
+        except Exception as error:
+            detail = type(error).__name__
+            ledger.log(state["run_id"], "bulletin_failed", detail)
+            print(
+                f"::warning::Weather bulletin unavailable for {state['run_id']} ({detail}); "
+                "verified forecast remains available",
+                file=sys.stderr,
+            )
+            return {"bulletin": {}, "bulletin_status": "failed"}
         ledger.log(state["run_id"], "bulletin_verified", bulletin["report_trigger"])
-        return {"bulletin": bulletin}
+        return {"bulletin": bulletin, "bulletin_status": "verified"}
 
     def drift(state):
         try:
@@ -281,7 +294,7 @@ def main(argv=None):
     crossings = state["drift_result"]["drift_count"]
     print(
         f"{state['status']}: {run_id} ({len(state['payload']['forecasts'])} forecast rows, "
-        f"{len(state['alerts'])} alert episodes, report {state['bulletin']['report_trigger']}, "
+        f"{len(state['alerts'])} alert episodes, bulletin {state['bulletin_status']}, "
         f"{crossings if crossings is not None else 'unknown'} drift thresholds crossed)"
     )
     return 0

@@ -15,8 +15,9 @@ from mosamiat.modeling.inference import MODEL, recent_history
 
 
 @pytest.mark.parametrize("use_active", [False, True])
+@pytest.mark.parametrize("bulletin_fails", [False, True])
 def test_live_graph_replays_prepared_forecast_after_publication_failure(
-    tmp_path, monkeypatch, use_active
+    tmp_path, monkeypatch, use_active, bulletin_fails
 ):
     graph = pytest.importorskip("mosamiat.agents.graph")
     with httpx.Client(
@@ -106,6 +107,8 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(
     read.side_effect = [httpx.ReadTimeout("interrupted readback"), saved.copy()]
     bulletins = MagicMock()
     bulletins.insert.return_value = (None, None)
+    if bulletin_fails:
+        bulletins.insert.side_effect = RuntimeError("simulated bulletin materialization failure")
     bulletins.primary_key = ["run_id"]
     bulletins.event_time = "issued_at_utc"
     bulletins.select_all.return_value.filter.return_value.read.side_effect = lambda **_: (
@@ -142,6 +145,7 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(
     )
     state = app.invoke(dict(run_id="hourly", retry=True))
     assert state["status"] == "verified"
+    assert state["bulletin_status"] == ("failed" if bulletin_fails else "verified")
     checkpoint.assert_called_once()
     assert checkpoint.call_args.args[0][-1] == "forecast_completed"
     assert read.call_count == 5
@@ -155,6 +159,9 @@ def test_live_graph_replays_prepared_forecast_after_publication_failure(
         "drift",
     ]
     assert "daily" in bulletins.insert.call_args.args[0].iloc[0].report_trigger.split("+")
+    assert ("bulletin_failed" in [e["status"] for e in events]) is bulletin_fails
+    if bulletin_fails:
+        assert "forecast_completed" in [e["status"] for e in events]
     assert drift_group.insert.call_args.args[0].iloc[0].run_id == "hourly"
     if use_active:
         assert state["drift_result"]["training_status"] == "failed"
